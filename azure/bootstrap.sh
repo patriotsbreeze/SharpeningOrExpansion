@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
-# Azure VM cloud-init (--custom-data). Idempotent: re-runs safely on every boot.
+# Azure VM cloud-init (--custom-data).
 #
-# Running on EVERY boot is not incidental. A spot VM created with --eviction-policy Delete is
-# replaced rather than resumed, and local NVMe comes back RAW after any redeploy, so a
-# first-boot-only setup leaves a later instance with no scratch mount and a confusing failure
-# deep inside the run.
+# Azure runs custom-data ONCE per instance, not on every boot -- `scripts-user` is in
+# cloud_final_modules as a per-instance module. That matters because local NVMe comes back
+# RAW after a redeploy or a stop/start, so a first-boot-only setup would leave a rebooted
+# instance with no scratch mount and a confusing failure deep inside the run.
+#
+# So this script installs ITSELF as a per-boot hook (/var/lib/cloud/scripts/per-boot) on its
+# first run, and every stage below is written to be idempotent. With --eviction-policy Delete
+# an evicted spot VM is replaced rather than resumed, so the per-boot path mainly covers
+# reboots and stop/start -- but those are exactly the cases where silent scratch loss would
+# otherwise be hardest to diagnose.
 #
 # The most expensive failure mode on Azure is that CLOUD-INIT FAILURE IS NOT PROVISIONING
 # FAILURE: the portal reports the VM Running while this script died at step two, and a broken
 # GPU VM bills at full rate for hours doing nothing. So this script publishes a heartbeat to
-# blob storage at each stage, and the launcher reaps any VM that never heartbeats.
+# blob storage at each stage, keeps beating while the job runs, and records the job's exit
+# code. `azure/reap.sh` acts on that: it deletes VMs with no heartbeat past a deadline, a
+# stale heartbeat, or a completed job.
 set -Eeuo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/patriotsbreeze/SharpeningOrExpansion.git}"
@@ -40,6 +48,22 @@ _url() {  # splice the path ahead of any SAS query string
 trap 'log "BOOTSTRAP FAILED at line ${LINENO}"; beat failed' ERR
 
 beat start
+
+# ------------------------------------------------------------------ per-boot installation
+# Copy ourselves somewhere stable and register a per-boot hook, so a reboot re-runs the
+# idempotent setup below rather than coming up with a RAW, unmounted scratch disk.
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+install -D -m 0755 "${SELF}" /usr/local/sbin/soe-bootstrap
+if [[ ! -e /var/lib/cloud/scripts/per-boot/00-soe ]]; then
+  mkdir -p /var/lib/cloud/scripts/per-boot
+  cat > /var/lib/cloud/scripts/per-boot/00-soe <<'HOOK'
+#!/usr/bin/env bash
+# Re-run the idempotent bootstrap on every boot. See /usr/local/sbin/soe-bootstrap.
+[[ -r /etc/profile.d/soe.sh ]] && . /etc/profile.d/soe.sh
+exec /usr/local/sbin/soe-bootstrap
+HOOK
+  chmod 0755 /var/lib/cloud/scripts/per-boot/00-soe
+fi
 
 # ------------------------------------------------------------------ scratch on local NVMe
 # The Ubuntu-HPC image does NOT ship /mnt/resource_nvme or an nvme-raid unit -- the call site
@@ -107,8 +131,15 @@ beat watcher
 
 # ------------------------------------------------------------------ tooling
 log "verifying GPU stack (the image ships the driver; we do not install one)"
-nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader \
-  || log "WARN: nvidia-smi failed -- wrong image? expected microsoft-dsvm:ubuntu-hpc"
+# Fatal, and checked BEFORE the clone and the dependency install. A GPU VM that cannot see its
+# GPU can never run the workload, so the only question is whether we discover that in seconds
+# or after ten minutes of pip at several dollars an hour.
+if ! nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader; then
+  log "FATAL: nvidia-smi failed. Wrong image? Expected microsoft-dsvm:ubuntu-hpc, which"
+  log "       ships the driver; a stock Canonical image has none."
+  beat no-gpu
+  exit 1
+fi
 [[ -f /opt/azurehpc/component_versions.txt ]] && \
   log "image components: $(tr '\n' ' ' < /opt/azurehpc/component_versions.txt)"
 
@@ -161,9 +192,22 @@ beat ready
 # ------------------------------------------------------------------ optional autostart
 if [[ -n "${SOE_CONFIG:-}" ]]; then
   log "autostarting ${SOE_CONFIG} as worker ${SOE_WORKER:-<local GPUs>}"
-  nohup bash "${WORKDIR}/scripts/launch_node.sh" "${SOE_CONFIG}" \
-    > /var/log/soe-run.log 2>&1 &
+  # Run it in the FOREGROUND of a detached child that beats on exit. Backgrounding and
+  # emitting `beat running` immediately -- as an earlier version did -- made `running` the
+  # last heartbeat ever sent, so a job that died one second later still looked alive for the
+  # rest of the run and the reaper had nothing to act on.
+  setsid bash -c '
+    beat_exit() { echo "job-exit $1 '"$(date -u +%FT%TZ)"'" >> "'"${HEARTBEAT}"'"; }
+    bash "'"${WORKDIR}"'/scripts/launch_node.sh" "'"${SOE_CONFIG}"'" \
+      > /var/log/soe-run.log 2>&1
+    rc=$?
+    beat_exit "${rc}"
+    exit "${rc}"
+  ' &
   beat running
+  # Keep publishing the heartbeat while the job runs, so "last beat is stale" means the VM is
+  # genuinely dead rather than merely past bootstrap.
+  ( while :; do sleep 60; beat alive; done ) >/dev/null 2>&1 &
 else
   log "ready. ssh in, source /etc/profile.d/soe.sh, then scripts/launch_node.sh <config>"
 fi

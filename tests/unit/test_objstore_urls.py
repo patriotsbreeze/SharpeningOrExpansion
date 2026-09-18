@@ -118,32 +118,69 @@ def test_bash_syntax_is_valid():
         subprocess.run(["bash", "-n", str(path)], check=True, capture_output=True)
 
 
-def test_push_uploads_shards_before_markers():
-    """The marker-last invariant has to survive the network hop, not just the local disk.
+def test_push_snapshots_markers_before_uploading_anything():
+    """Two passes alone are not enough; the marker list must be snapshotted first.
 
-    A single recursive upload transfers files in whatever order the tool picks, so a
-    ".done.json" can land in blob storage before the shard it vouches for. If the VM is then
-    evicted -- and with --eviction-policy Delete its disk is gone -- the next worker sees that
-    marker, concludes the chunk is finished, and skips it forever: recorded complete, data
-    nowhere. So the push must be two passes, markers second.
+    Pushes run every SYNC_INTERVAL while generation is still writing, so the tree is not
+    quiescent. If the markers pass re-enumerated the tree, a chunk completing after the first
+    pass walked its directory would have its marker uploaded with its shard left behind -- an
+    eviction then destroys the only copy, and the next worker skips the chunk forever on the
+    strength of that marker. Snapshotting first means every marker sent is one whose shard
+    provably existed before the first pass enumerated.
+
+    The behavioural counterpart is tests/integration/test_push_ordering.py, which mutates the
+    tree mid-push and asserts the store never holds an orphaned marker.
     """
     code = _code_lines(OBJSTORE)
     start = next(i for i, ln in enumerate(code) if ln.startswith("objstore_push()"))
     end = next(i for i, ln in enumerate(code[start + 1 :], start + 1) if ln.startswith("}"))
     body = code[start : end + 1]
+    joined = "\n".join(body)
 
-    for backend, exclude, include in (
-        ("azure)", '--exclude-pattern "*.done.json"', '--include-pattern "*.done.json"'),
-        ("s3)", '--exclude "*.done.json"', '--include "*.done.json"'),
-    ):
-        bstart = next(i for i, ln in enumerate(body) if ln.strip().startswith(backend))
-        seg = " ".join(body[bstart : bstart + 10])
-        assert exclude in seg, f"{backend} push must first upload everything EXCEPT markers"
-        assert include in seg, f"{backend} push must then upload markers"
-        assert seg.index(exclude) < seg.index(include), (
-            f"{backend}: the markers-only pass must come SECOND, or a marker can precede "
-            f"its shard into storage"
-        )
+    snap = next(i for i, ln in enumerate(body) if "snapshot" in ln and "find" in ln)
+    first_upload = next(
+        i
+        for i, ln in enumerate(body)
+        if any(c in ln for c in ("azcopy copy", "aws s3 sync", "_fs_copy_all"))
+    )
+    assert snap < first_upload, (
+        "the marker snapshot must be taken BEFORE any upload begins, or a marker written "
+        "mid-push can be sent without its shard"
+    )
+    assert "-name '*.done.json'" in body[snap]
+
+    # Every backend's first pass must exclude markers, and its second must be driven by the
+    # snapshot rather than a fresh enumeration.
+    assert '--exclude-pattern "*.done.json"' in joined, "azure pass 1 must exclude markers"
+    assert '--list-of-files "${snapshot}"' in joined, "azure pass 2 must use the snapshot"
+    assert '--exclude "*.done.json"' in joined, "s3 pass 1 must exclude markers"
+    assert 'read -r rel' in joined, "s3/file pass 2 must iterate the snapshot"
+
+
+def test_push_propagates_copy_failures():
+    """`find -exec` discards per-file exit status, so a push can copy nothing and return 0.
+
+    That is the worst failure available here: the run looks durable, the VM is evicted, and
+    everything it produced is gone.
+    """
+    code = "\n".join(_code_lines(OBJSTORE))
+    assert "-exec cp" not in code, "find -exec swallows the exit status of every copy"
+    assert "_fs_copy_all" in code, "the file backend must use the error-propagating helper"
+
+
+def test_manifest_publication_is_write_once():
+    """problem_idx is a position in the manifest and feeds every seed.
+
+    A second publisher overwriting it mid-run repartitions the experiment underneath the
+    workers already generating against the first version. Write-once also makes leadership
+    takeover safe: whoever wins, everyone consumes the winner's bytes.
+    """
+    code = "\n".join(_code_lines(OBJSTORE))
+    assert "objstore_publish_once" in code
+    assert "--overwrite=false" in code, "the manifest must not be overwritable"
+    launch = "\n".join(_code_lines(LAUNCH))
+    assert "objstore_publish_once" in launch
+    assert "objstore_push_file" not in launch, "the overwriting publisher must not be used"
 
 
 def test_marker_pull_never_fetches_shards():

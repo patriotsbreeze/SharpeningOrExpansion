@@ -56,12 +56,18 @@ az quota list --scope "$SCOPE" -o table          # cross-check names against ste
 az quota update --resource-name <ARM_NAME_FROM_STEP_1> --scope "$SCOPE" \
   --limit-object value=80 --resource-type dedicated
 
-# Spot pool -- a SEPARATE pool that does NOT follow from the request above
-az quota update --resource-name <ARM_NAME_FROM_STEP_1> --scope "$SCOPE" \
-  --limit-object value=80 --resource-type lowPriority
+# Spot pool -- a SEPARATE pool with its OWN resource name, not a resource-type on the
+# dedicated family. Take the exact name from the spot/low-priority row that step 1 printed
+# (commonly `lowPriorityCores`, but read it, do not assume):
+az quota update --resource-name <SPOT_ROW_NAME_FROM_STEP_1> --scope "$SCOPE" \
+  --limit-object value=80
 
 az quota request status list --scope "$SCOPE" -o table
 ```
+
+⚠️ `--resource-type lowPriority` is **not** a Compute discriminator — passing it against the
+dedicated family name silently requests the wrong pool, and you discover that when every spot
+create fails allocation. The spot quota is its own row with its own name.
 
 40 vCPU per NC40ads worker, 24 per NC24ads — so 80 buys two concurrent H100 workers.
 Requesting is free: **ask in two or three regions in parallel.** If `az quota` misbehaves, the
@@ -89,6 +95,11 @@ unverified figures below with real numbers for your region.
 az group create -n soe-data -l "$LOCATION"
 az storage account create -g soe-data -n <STORAGE_ACCOUNT> -l "$LOCATION" \
   --sku Standard_LRS --kind StorageV2
+# --auth-mode login uses the DATA plane, which subscription Owner alone does not grant.
+# Give yourself the data role first (propagation takes a minute or two):
+az role assignment create --assignee "$(az ad signed-in-user show --query id -o tsv)" \
+  --role "Storage Blob Data Contributor" \
+  --scope "$(az storage account show -n <STORAGE_ACCOUNT> --query id -o tsv)"
 az storage container create --account-name <STORAGE_ACCOUNT> -n soe --auth-mode login
 export AZ_CONTAINER_URL="https://<STORAGE_ACCOUNT>.blob.core.windows.net/soe"
 ```
@@ -106,6 +117,20 @@ export CONFIG=configs/experiments/stage1_tierA.yaml
 
 One single-GPU VM per worker, each with a system-assigned identity scoped to
 `Storage Blob Data Contributor` on that storage account only.
+
+Pay-as-you-go fallback, when spot capacity does not materialise:
+
+```bash
+PRIORITY=Regular ./azure/launch.sh      # spot-only flags are omitted automatically
+```
+
+While it runs, reap anything billing without working — cloud-init failure does **not** surface
+as a provisioning failure, so the portal will show a dead VM as `Running`:
+
+```bash
+RG=soe-run ./azure/reap.sh              # report
+RG=soe-run DRY_RUN=0 ./azure/reap.sh    # delete
+```
 
 **Partial capacity is normal and fine.** If you ask for 4 and get 2, the run still completes —
 live workers steal the unclaimed shards. **Do not lower `n_workers` in the config to match the
@@ -139,7 +164,19 @@ once, against everything.
 
 ```bash
 mkdir -p runs && cd runs
-azcopy copy "$AZ_CONTAINER_URL/*" . --recursive          # shards AND markers this time
+azcopy login                                 # or AZCOPY_AUTO_LOGIN_TYPE=AZCLI after `az login`
+
+# If AZ_CONTAINER_URL carries a SAS, the wildcard must go BEFORE the "?" -- appending it after
+# folds the path into the signed query and the request targets the wrong prefix. With a plain
+# https URL, append it normally.
+SRC="${AZ_CONTAINER_URL%%\?*}/*"
+[[ "$AZ_CONTAINER_URL" == *"?"* ]] && SRC="$SRC?${AZ_CONTAINER_URL#*\?}"
+azcopy copy "$SRC" . --recursive             # shards AND markers this time
+
+# Grade here too. A VM that was evicted mid-run never reached its own grading step, so
+# its shards arrive ungraded -- and grading is CPU-only and idempotent via its own markers,
+# so re-running it over the whole tree is cheap and safe.
+soe grade   configs/experiments/stage1_tierA.yaml --root . --graders fastint,mathverify
 
 soe verify  configs/experiments/stage1_tierA.yaml --root . # deep by default; must pass
 soe figures configs/experiments/stage1_tierA.yaml --root . \

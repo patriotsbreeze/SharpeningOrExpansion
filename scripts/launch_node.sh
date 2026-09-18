@@ -81,42 +81,104 @@ react_to_eviction() {
 # ---------------------------------------------------------------- resume + manifest
 if objstore_configured; then
   echo "[launch] pulling completion markers (not shards) to reconstruct progress"
-  objstore_pull_markers "exp=${EXP}" "${EXPDIR}" || echo "[launch] no prior markers"
+  if ! objstore_pull_markers "exp=${EXP}" "${EXPDIR}"; then
+    # Distinguishing "nothing published yet" from "could not reach the store" matters: the
+    # latter looks like a fresh run, so the worker would regenerate everything already done
+    # and then write duplicate samples over the top of it.
+    echo "[launch] could not read completion markers from the object store." >&2
+    echo "[launch] Continuing would re-generate completed chunks and duplicate samples." >&2
+    exit 4
+  fi
 fi
 
 # Every worker plans independently from the same config, so all machines must agree on the
-# problem manifest -- problem_idx feeds the seed, so a manifest that differs between machines
-# makes the same seed denote different problems. The lead worker publishes one manifest and
-# the rest consume it, which removes that class of failure rather than detecting it later.
-LEAD=0
-have_manifest() { compgen -G "${EXPDIR}/problems/*.manifest.jsonl" > /dev/null; }
+# problem manifest: problem_idx is a position in that file and feeds every seed, so manifests
+# that differ between machines make the same seed denote different problems.
+#
+# Leadership is NOT tied to index 0. Partial capacity is the expected case for GPU spot, and
+# azure/launch.sh deliberately proceeds when some VMs fail to create -- so if index 0 is the
+# one Azure declined, a fixed lead would leave every other VM polling until it gave up, having
+# produced nothing while billing for GPUs the whole time. SOE_LEAD is set by the launcher to
+# the lowest index it ACTUALLY created; absent that, the lowest index on this machine.
+#
+# Leadership is also not exclusive. If the lead never publishes -- evicted during bootstrap, or
+# its dataset download outran the wait -- any worker may take over once the deadline passes.
+# That is safe because publication is write-once: whoever wins, everyone then consumes the
+# winner's bytes rather than their own, so the fleet cannot split across two manifests.
+LEAD="${SOE_LEAD:-${WORKERS[0]}}"
+MANIFEST_WAIT="${MANIFEST_WAIT:-60}"   # x10s
 
-if objstore_configured; then
+# Which datasets this experiment actually needs -- an existential "any manifest present" check
+# would let a worker proceed on a partially published directory and then fail deep in the run.
+mapfile -t DATASETS < <(python - "${CONFIG}" <<'PYEOF'
+import sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1]))
+print("\n".join(sorted({a["dataset_key"] for a in cfg["arms"]})))
+PYEOF
+)
+
+have_manifest() {
+  local k
+  for k in "${DATASETS[@]}"; do
+    [[ -s "${EXPDIR}/problems/${k}.manifest.jsonl" ]] || return 1
+  done
+  return 0
+}
+
+publish_manifests() {
+  local m rc=0
+  for k in "${DATASETS[@]}"; do
+    m="${EXPDIR}/problems/${k}.manifest.jsonl"
+    [[ -s "${m}" ]] || { echo "[launch] prepare produced no manifest for ${k}" >&2; return 1; }
+    objstore_publish_once "${m}" "exp=${EXP}/problems/${k}.manifest.jsonl" || rc=1
+  done
+  return "${rc}"
+}
+
+pull_manifests() {
+  objstore_configured || return 0
   objstore_pull_dir "exp=${EXP}/problems" "${EXPDIR}/problems" 2>/dev/null || true
-fi
+}
 
+pull_manifests
 if ! have_manifest; then
-  if [[ " ${WORKERS[*]} " == *" ${LEAD} "* ]] || ! objstore_configured; then
-    echo "[launch] preparing problem manifests (lead worker)"
+  if [[ "${WORKERS[0]}" == "${LEAD}" ]] || ! objstore_configured; then
+    echo "[launch] lead worker (${LEAD}); preparing problem manifests"
     python -m soe.cli prepare "${CONFIG}" --root "${ROOT}"
-    if objstore_configured; then
-      for m in "${EXPDIR}"/problems/*.manifest.jsonl; do
-        objstore_push_file "${m}" "exp=${EXP}/problems/$(basename "${m}")"
-      done
-    fi
+    publish_manifests || echo "[launch] WARN: publish incomplete; will re-pull the winner's copy"
   else
-    echo "[launch] waiting for the lead worker to publish manifests"
-    for _ in $(seq 1 60); do
+    echo "[launch] waiting up to $((MANIFEST_WAIT * 10))s for worker ${LEAD} to publish"
+    for _ in $(seq 1 "${MANIFEST_WAIT}"); do
       sleep 10
-      objstore_pull_dir "exp=${EXP}/problems" "${EXPDIR}/problems" 2>/dev/null || true
+      pull_manifests
       have_manifest && break
     done
-    have_manifest || {
-      echo "[launch] manifests never appeared. Refusing to build our own: two machines with" >&2
-      echo "[launch] different manifests corrupt the run silently. Start worker ${LEAD} first." >&2
-      exit 3
-    }
+    if ! have_manifest; then
+      # Takeover. Safe only because publication is write-once.
+      echo "[launch] lead ${LEAD} never published; taking over (publication is write-once)"
+      python -m soe.cli prepare "${CONFIG}" --root "${ROOT}"
+      publish_manifests || true
+    fi
   fi
+
+  # Always re-pull and use the PUBLISHED copy, even if we prepared it ourselves. If another
+  # worker won the write-once race, its bytes are authoritative and ours must be discarded --
+  # otherwise two machines proceed on two different problem orderings.
+  if objstore_configured; then
+    rm -f "${EXPDIR}"/problems/*.manifest.jsonl
+    for _ in 1 2 3; do
+      pull_manifests
+      have_manifest && break
+      sleep 5
+    done
+  fi
+
+  have_manifest || {
+    echo "[launch] no usable problem manifest for: ${DATASETS[*]}" >&2
+    echo "[launch] Refusing to run: proceeding on a manifest other machines do not share" >&2
+    echo "[launch] would make identical seeds denote different problems." >&2
+    exit 3
+  }
 fi
 
 python -m soe.cli plan "${CONFIG}" --root "${ROOT}"
@@ -125,13 +187,40 @@ python -m soe.cli plan "${CONFIG}" --root "${ROOT}"
 SYNC_PID=""
 WATCH_PID=""
 if objstore_configured; then
+  # Prove the object store is actually usable BEFORE burning GPU hours. Every objstore_push
+  # failure downstream is tolerated so a transient blip does not kill a run, which means
+  # without this probe a misconfigured container would let the whole run complete and then
+  # vanish with the VM.
+  objstore_require || exit 4
+  probe="${EXPDIR}/.objstore_probe"
+  mkdir -p "${EXPDIR}"
+  date -u +%FT%TZ > "${probe}"
+  if ! objstore_push "${EXPDIR}" "exp=${EXP}"; then
+    echo "[launch] object store is not writable; refusing to start a run that cannot persist" >&2
+    exit 4
+  fi
+  rm -f "${probe}"
+
   # Both helpers redirect their own output. A background job that inherits this script's
   # stdout keeps the pipe open after the script exits, so any caller that captures output --
   # a CI harness, `az vm run-command`, subprocess.run(capture_output=True) -- blocks until
   # the helper happens to die rather than when the run actually finishes.
-  ( while true; do
+  ( fails=0
+    while true; do
       sleep "${SYNC_INTERVAL}"
-      objstore_push "${EXPDIR}" "exp=${EXP}" || true
+      if objstore_push "${EXPDIR}" "exp=${EXP}"; then
+        fails=0
+      else
+        fails=$((fails + 1))
+        echo "[sync] push failed (${fails} consecutive)"
+        # Tolerate a blip, but a store that stays unreachable means everything produced from
+        # here on dies with the VM. Stop rather than keep burning GPU hours undurably.
+        if (( fails >= 3 )); then
+          echo "[sync] giving up after ${fails} consecutive failures; signalling the run"
+          touch "${EXPDIR}/.sync_broken"
+          exit 1
+        fi
+      fi
     done ) >> "${LOGDIR}/sync.log" 2>&1 &
   SYNC_PID=$!
   react_to_eviction >> "${LOGDIR}/eviction.log" 2>&1 &
@@ -143,6 +232,9 @@ cleanup() {
   local pid
   for pid in "${SYNC_PID}" "${WATCH_PID}"; do
     [[ -n "${pid}" ]] || continue
+    # Kill the descendants too. The syncer spends almost all its life blocked in `sleep`, and
+    # killing only the subshell leaves that sleep alive holding any inherited descriptor.
+    pkill -P "${pid}" 2>/dev/null || true
     kill "${pid}" 2>/dev/null || true
     wait "${pid}" 2>/dev/null || true
   done
@@ -170,6 +262,7 @@ done
 fail=0
 for pid in "${pids[@]}"; do wait "${pid}" || fail=1; done
 echo "[launch] generation finished (fail=${fail})"
+[[ -f "${EXPDIR}/.sync_broken" ]] && { echo "[launch] object store became unreachable mid-run" >&2; fail=1; }
 
 # ---------------------------------------------------------------- grade + verify
 python -m soe.cli grade  "${CONFIG}" --root "${ROOT}" --graders "${GRADERS}"

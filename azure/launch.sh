@@ -49,7 +49,15 @@ SUB=$(az account show --query id -o tsv)
 SCOPE="/subscriptions/${SUB}/resourceGroups/$(az storage account show \
   --name "${STORAGE_ACCOUNT}" --query resourceGroup -o tsv)/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT}"
 
-created=() failed=()
+# Leadership goes to the first VM that actually gets created, not to index 0.
+#
+# Partial capacity is the normal case for GPU spot, and a fleet whose index 0 was declined
+# would otherwise have every other VM wait for a lead that does not exist -- producing nothing
+# while billing for GPUs. Creates are sequential, so the first success is knowable here and
+# can be baked into every later VM's custom-data. If the lead is then evicted during its own
+# bootstrap, launch_node.sh lets any worker take over, which is safe because manifest
+# publication is write-once.
+created=() failed=() LEAD_IDX=""
 for ((w = 0; w < FLEET; w++)); do
   NAME="soe-w${w}"
   USERDATA=$(mktemp)
@@ -57,13 +65,22 @@ for ((w = 0; w < FLEET; w++)); do
     echo '#!/usr/bin/env bash'
     echo "export AZ_CONTAINER_URL='${AZ_CONTAINER_URL}'"
     echo "export SOE_WORKER='${w}'"
+    echo "export SOE_LEAD='${LEAD_IDX:-${w}}'"
     echo "export SOE_CONFIG='${CONFIG}'"
     echo "export BRANCH='${BRANCH}'"
     echo "export AZCOPY_AUTO_LOGIN_TYPE=MSI"
     cat "$(dirname "$0")/bootstrap.sh"
   } > "${USERDATA}"
 
-  echo "[launch] creating ${NAME} (worker ${w})"
+  # Spot-only flags must not be passed for a Regular VM -- az rejects --eviction-policy and
+  # --max-price outside Spot, so hardcoding them made the pay-as-you-go fallback that the
+  # runbook recommends impossible to actually launch.
+  PRIO_ARGS=(--priority "${PRIORITY}")
+  if [[ "${PRIORITY}" == "Spot" || "${PRIORITY}" == "Low" ]]; then
+    PRIO_ARGS+=(--eviction-policy Delete --max-price -1)
+  fi
+
+  echo "[launch] creating ${NAME} (worker ${w}, ${PRIORITY})"
   # --eviction-policy Delete, not the Deallocate default: a deallocated spot VM keeps billing
   #   for its disks AND keeps consuming spot quota, so replacements cannot allocate and the
   #   fleet strangles itself within hours.
@@ -76,15 +93,16 @@ for ((w = 0; w < FLEET; w++)); do
       --resource-group "${RG}" --name "${NAME}" --location "${LOCATION}" \
       --size "${VM_SIZE}" --image "${IMAGE}" \
       --admin-username "${ADMIN}" --ssh-key-values "${SSH_KEY}" \
-      --priority "${PRIORITY}" --eviction-policy Delete --max-price -1 \
+      "${PRIO_ARGS[@]}" \
       --assign-identity '[system]' \
       --os-disk-size-gb "${OS_DISK_GB}" \
       --os-disk-delete-option Delete --nic-delete-option Delete \
-      --public-ip-sku Standard \
+      --public-ip-sku Standard --public-ip-address-delete-option Delete \
       --custom-data "${USERDATA}" \
       --tags "project=SharpeningOrExpansion" "worker=${w}" "config=${CONFIG}" \
       -o none 2>/tmp/soe_create_${w}.err; then
     created+=("${NAME}")
+    [[ -n "${LEAD_IDX}" ]] || LEAD_IDX="${w}"
     PRINCIPAL=$(az vm show -g "${RG}" -n "${NAME}" --query identity.principalId -o tsv)
     # Least privilege: the VM needs to read and write blobs and nothing else.
     az role assignment create --assignee-object-id "${PRINCIPAL}" \
@@ -100,6 +118,7 @@ done
 
 echo ""
 echo "[launch] created ${#created[@]}/${FLEET}: ${created[*]:-none}"
+[[ -n "${LEAD_IDX}" ]] && echo "[launch] lead worker (publishes the problem manifest): ${LEAD_IDX}"
 if ((${#failed[@]} > 0)); then
   echo "[launch] failed ${#failed[@]}: ${failed[*]}"
   # Partial capacity is the normal case for GPU spot. The steal pass means a smaller fleet
@@ -116,8 +135,10 @@ cat <<MSG
     az vm run-command invoke -g ${RG} -n ${created[0]} --command-id RunShellScript \\
       --scripts 'tail -30 /var/log/soe-bootstrap.log /var/log/soe-run.log'
 
-  Heartbeats (a VM with no heartbeat is billing and doing nothing -- reap it):
-    azcopy list '${AZ_CONTAINER_URL}' --output-level=essential | grep heartbeat
+  Reap VMs that are billing but not working (cloud-init failure does NOT show up as a
+  provisioning failure -- the portal says Running while bootstrap is dead):
+    RG=${RG} AZ_CONTAINER_URL='${AZ_CONTAINER_URL}' ./azure/reap.sh          # report
+    RG=${RG} AZ_CONTAINER_URL='${AZ_CONTAINER_URL}' DRY_RUN=0 ./azure/reap.sh  # delete
 
   TEAR DOWN EVERYTHING (this is the only complete teardown):
     az group delete -n ${RG} --yes --no-wait
