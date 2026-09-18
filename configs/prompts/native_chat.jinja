@@ -1,0 +1,6 @@
+{#- Sentinel. Rendering delegates to tokenizer.apply_chat_template so each model gets exactly
+    the template it was trained with. R1-Distill in particular only enters its <think> mode
+    under its own template, and DeepSeek recommends no system turn. The rendered result is
+    hashed into prompt_sha and frozen under fixtures/prompts_golden/, so a tokenizer revision
+    bump fails a CPU test instead of corrupting a paid run. -#}
+__NATIVE_CHAT__

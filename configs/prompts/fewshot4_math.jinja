@@ -1,0 +1,10 @@
+{#- 4-shot completion-mode CoT for base models. sail-sg/understand-r1-zero documents that
+    template choice dominates base-model behaviour, so the base arm runs both this and
+    zeroshot_boxed and is scored at its best -- making any expansion finding conservative. -#}
+{% for ex in exemplars -%}
+Problem: {{ ex.question }}
+Solution: {{ ex.solution }} The final answer is \boxed{ {{- ex.answer -}} }.
+
+{% endfor -%}
+Problem: {{ question }}
+Solution:

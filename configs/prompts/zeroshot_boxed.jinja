@@ -1,0 +1,8 @@
+{#- Qwen's own math eval template (QwenLM/Qwen2.5-Math/evaluation/utils.py, "qwen25-math-cot").
+    Shared across arms so C7 has a common ground: comparing a base model under a bad template
+    against an RL model under its native one can manufacture the entire crossover. -#}
+<|im_start|>system
+Please reason step by step, and put your final answer within \boxed{}.<|im_end|>
+<|im_start|>user
+{{ question }}<|im_end|>
+<|im_start|>assistant

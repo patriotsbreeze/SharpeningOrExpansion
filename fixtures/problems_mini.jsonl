@@ -1,0 +1,12 @@
+{"problem": "Let $N$ be the least positive integer divisible by $7$ whose digits sum to $21$. Find $N$.", "answer": "399"}
+{"problem": "Find the number of ordered pairs $(a,b)$ of positive integers with $a+b=30$ and $\\gcd(a,b)=3$.", "answer": "8"}
+{"problem": "A fair coin is flipped $10$ times. Find $100p$ rounded down, where $p$ is the probability of exactly $5$ heads.", "answer": "24"}
+{"problem": "Let $f(x)=x^2-6x+13$. Find the minimum value of $f$.", "answer": "4"}
+{"problem": "Find the remainder when $3^{100}$ is divided by $1000$.", "answer": "1"}
+{"problem": "How many diagonals does a convex polygon with $20$ sides have?", "answer": "170"}
+{"problem": "Find the sum of all positive divisors of $360$.", "answer": "1170"}
+{"problem": "Let $S=\\sum_{k=1}^{99} \\frac{1}{k(k+1)}$. Find $100S$.", "answer": "99"}
+{"problem": "Find the largest prime factor of $2^{12}-1$.", "answer": "13"}
+{"problem": "A triangle has sides $13$, $14$, $15$. Find its area.", "answer": "84"}
+{"problem": "Find the number of trailing zeros in $100!$.", "answer": "24"}
+{"problem": "Let $x+y=10$ and $xy=21$. Find $x^3+y^3$.", "answer": "370"}
