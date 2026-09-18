@@ -1,0 +1,16 @@
+# CPU-only smoke test. No GPU, no network, no real weights.
+# This is what proves the pipeline before any paid compute is committed.
+exp_id: smoke_mock
+description: Mock backend end-to-end validation against known analytic ground truth.
+backend: mock
+n_workers: 2
+sampling:
+  n_total: 64
+  chunk_size: 16
+  temperature: 1.0
+  top_p: 1.0
+  max_new_tokens: 512
+  max_prompt_tokens: 1024
+arms:
+  - {model_key: mock_base, dataset_key: mock_mini, variant: zeroshot_boxed}
+  - {model_key: mock_rl,   dataset_key: mock_mini, variant: zeroshot_boxed}

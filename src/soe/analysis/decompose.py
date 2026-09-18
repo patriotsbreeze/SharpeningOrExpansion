@@ -26,13 +26,25 @@ from soe.analysis.adjustments import CONFOUNDS, AnalysisState, apply_set
 from soe.analysis.passk import pass_at_k
 
 
+class EmptyStratumError(RuntimeError):
+    """An adjustment left no problems with positive weight.
+
+    Silently returning NaN here would poison the whole Shapley lattice with NaN and produce a
+    decomposition that looks computed but means nothing, so this is loud. In practice it means
+    C2's informative band and C3's date filter have no overlap on this problem set -- widen the
+    band, or run the decomposition on Tier A union Tier B where there is enough support.
+    """
+
+
 def weighted_pass_at_k(correct: np.ndarray, weights: np.ndarray, k: int) -> float:
     """Weighted mean of per-problem unbiased pass@k. Zero-weight problems drop out."""
     n = correct.shape[1]
     k = min(k, n)
     live = weights > 0
     if not live.any():
-        return float("nan")
+        raise EmptyStratumError(
+            f"no problems left with positive weight (started from {len(weights)})"
+        )
     c = correct[live].sum(axis=1)
     vals = np.array([pass_at_k(n, int(ci), k) for ci in c])
     w = weights[live]
@@ -95,7 +107,14 @@ def decompose(
 
     def G(S: frozenset) -> float:
         if S not in cache:
-            cache[S] = gap(apply_set(st, S, kwargs=kwargs))
+            try:
+                cache[S] = gap(apply_set(st, S, kwargs=kwargs))
+            except EmptyStratumError as e:
+                raise EmptyStratumError(
+                    f"adjustment subset {sorted(S) or ['(none)']} emptied the problem set: {e}. "
+                    f"Every subset of the lattice must be estimable or the Shapley values are "
+                    f"undefined."
+                ) from None
         return cache[S]
 
     g_empty = G(frozenset())
@@ -167,7 +186,9 @@ def bootstrap_decompose(
         )
         try:
             d = decompose(st_b, confounds=confounds, kwargs=kwargs)
-        except (AssertionError, ValueError):
+        except (AssertionError, ValueError, EmptyStratumError):
+            # A resampled problem set can empty a stratum by chance; skip that replicate and
+            # report how many survived, rather than quietly narrowing the interval.
             continue
         raws.append(d.raw_gap)
         for c in confounds:

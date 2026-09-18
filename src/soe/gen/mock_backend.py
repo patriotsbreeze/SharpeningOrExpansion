@@ -36,6 +36,9 @@ class MockBackend:
         guess_rate: float = 0.04,
         degenerate_rate: float = 0.02,
         malformed_rate: float = 0.02,
+        base_len_frac: float = 0.22,
+        rl_len_frac: float = 0.55,
+        len_sigma: float = 0.6,
         answers: dict[int, str] | None = None,
     ) -> None:
         self.base_p_alpha = base_p_alpha
@@ -45,6 +48,13 @@ class MockBackend:
         self.guess_rate = guess_rate
         self.degenerate_rate = degenerate_rate
         self.malformed_rate = malformed_rate
+        # Completion length is expressed as a FRACTION of the request's own max_tokens, not as
+        # an absolute scale. Otherwise the long-CoT arm truncates on essentially every sample
+        # and the smoke test measures truncation rather than the pipeline. The base/RL
+        # asymmetry is preserved, which is what gives C5 and C6 real signal.
+        self.base_len_frac = base_len_frac
+        self.rl_len_frac = rl_len_frac
+        self.len_sigma = len_sigma
         self.answers = answers or {}
         self._spec = None
 
@@ -93,7 +103,9 @@ class MockBackend:
         gold = self.answers.get(problem_idx, "42")
         role = getattr(self._spec, "role", "base")
 
-        n_tok = int(np.clip(rng.lognormal(6.6 if role == "base" else 7.6, 0.6), 32, r.max_tokens * 4))
+        frac = self.base_len_frac if role == "base" else self.rl_len_frac
+        mu = float(np.log(max(2.0, frac * r.max_tokens)))
+        n_tok = int(np.clip(rng.lognormal(mu, self.len_sigma), 8, r.max_tokens * 4))
         truncated = rng.random() < self.truncation_rate or n_tok > r.max_tokens
         n_tok = min(n_tok, r.max_tokens)
 
