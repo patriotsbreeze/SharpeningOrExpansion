@@ -12,7 +12,12 @@
 # markers encode exactly that. Pulling the shards too would mean re-downloading hundreds of
 # gigabytes every time a spot VM comes back.
 #
-# Backend is chosen by SOE_OBJSTORE: azure (default) | s3 | none.
+# Backend is chosen by SOE_OBJSTORE: azure (default) | s3 | file | none.
+#
+# The `file` backend treats SOE_FILE_STORE as the remote. It exists so the resume path --
+# the riskiest part of the whole system, and the part a unit test cannot otherwise reach --
+# can be exercised end to end without a cloud account. It mirrors the azure backend's
+# semantics exactly, including the two-pass ordering.
 #
 # On Azure we use `azcopy copy`, never `azcopy sync` and never `az storage blob sync`.
 # `az storage blob sync` hardcodes --delete-destination=true and does not mention it in
@@ -32,6 +37,7 @@ objstore_configured() {
   case "$(objstore_backend)" in
     azure) [[ -n "${AZ_CONTAINER_URL:-}" ]] ;;
     s3)    [[ -n "${S3_URI:-}" ]] ;;
+    file)  [[ -n "${SOE_FILE_STORE:-}" ]] ;;
     *)     return 1 ;;
   esac
 }
@@ -43,6 +49,7 @@ objstore_require() {
     case "$(objstore_backend)" in
       azure) echo "[objstore] AZ_CONTAINER_URL is unset (expected a container SAS or https URL)" >&2 ;;
       s3)    echo "[objstore] S3_URI is unset" >&2 ;;
+      file)  echo "[objstore] SOE_FILE_STORE is unset" >&2 ;;
       none)  return 0 ;;
       *)     echo "[objstore] unknown SOE_OBJSTORE='$(objstore_backend)'" >&2 ;;
     esac
@@ -50,6 +57,16 @@ objstore_require() {
   fi
 }
 
+# Push the artifact tree in TWO passes: everything except markers, then markers.
+#
+# This preserves the marker-last invariant ACROSS THE NETWORK, and that invariant is the
+# entire basis of resume correctness. A single recursive upload transfers files in whatever
+# order the tool chooses, so a ".done.json" can land in blob storage before the shard it
+# vouches for. If the VM is then evicted -- and with --eviction-policy Delete its local disk
+# is gone -- the next worker pulls that marker, concludes the chunk is finished, and skips it
+# forever. The chunk is recorded as complete while its data does not exist anywhere.
+#
+# Two passes make that impossible: a marker is only ever uploaded after the shard beside it.
 objstore_push() {
   local local_dir="$1" remote_sub="$2"
   objstore_configured || { echo "[objstore] not configured; skipping push" >&2; return 0; }
@@ -62,10 +79,27 @@ objstore_push() {
       # is the container root and the "${remote_sub}" component comes from the local dir's
       # own basename. Passing the full remote path here would nest it twice.
       azcopy copy "${local_dir}" "$(_az_url "")" \
-        --recursive --overwrite=ifSourceNewer --output-level=essential
+        --recursive --exclude-pattern "*.done.json" \
+        --overwrite=ifSourceNewer --output-level=essential || return 1
+      azcopy copy "${local_dir}" "$(_az_url "")" \
+        --recursive --include-pattern "*.done.json" \
+        --overwrite=ifSourceNewer --output-level=essential || return 1
       ;;
     s3)
-      aws s3 sync "${local_dir}" "${S3_URI}/${remote_sub}" --only-show-errors
+      aws s3 sync "${local_dir}" "${S3_URI}/${remote_sub}" \
+        --exclude "*.done.json" --only-show-errors || return 1
+      aws s3 sync "${local_dir}" "${S3_URI}/${remote_sub}" \
+        --exclude "*" --include "*.done.json" --only-show-errors || return 1
+      ;;
+    file)
+      # Same two-pass ordering as azure: everything but markers, then markers.
+      mkdir -p "${SOE_FILE_STORE}"
+      ( cd "$(dirname "${local_dir}")" && \
+        find "$(basename "${local_dir}")" -type f ! -name '*.done.json' \
+          -exec cp --parents -f {} "${SOE_FILE_STORE}/" \; ) || return 1
+      ( cd "$(dirname "${local_dir}")" && \
+        find "$(basename "${local_dir}")" -type f -name '*.done.json' \
+          -exec cp --parents -f {} "${SOE_FILE_STORE}/" \; ) || return 1
       ;;
     none) return 0 ;;
   esac
@@ -84,6 +118,13 @@ objstore_pull_markers() {
       aws s3 sync "${S3_URI}/${remote_sub}" "${local_dir}" \
         --exclude "*" --include "*.done.json" --only-show-errors
       ;;
+    file)
+      local base; base="$(basename "${local_dir}")"
+      [[ -d "${SOE_FILE_STORE}/${base}" ]] || return 0
+      ( cd "${SOE_FILE_STORE}" && \
+        find "${base}" -type f -name '*.done.json' \
+          -exec cp --parents -f {} "$(dirname "${local_dir}")/" \; ) || return 1
+      ;;
     none) return 0 ;;
   esac
 }
@@ -95,6 +136,8 @@ objstore_push_file() {
   case "$(objstore_backend)" in
     azure) azcopy copy "${local_file}" "$(_az_url "${remote_sub}")" --overwrite=true --output-level=essential ;;
     s3)    aws s3 cp "${local_file}" "${S3_URI}/${remote_sub}" --only-show-errors ;;
+    file)  mkdir -p "${SOE_FILE_STORE}/$(dirname "${remote_sub}")" &&
+           cp -f "${local_file}" "${SOE_FILE_STORE}/${remote_sub}" ;;
     none)  return 0 ;;
   esac
 }
@@ -108,6 +151,8 @@ objstore_pull_dir() {
     azure) azcopy copy "$(_az_url "${remote_sub}" "/*")" "${local_dir}" \
              --recursive --overwrite=true --output-level=essential 2>/dev/null || return 1 ;;
     s3)    aws s3 sync "${S3_URI}/${remote_sub}" "${local_dir}" --only-show-errors || return 1 ;;
+    file)  [[ -d "${SOE_FILE_STORE}/${remote_sub}" ]] || return 1
+           cp -rf "${SOE_FILE_STORE}/${remote_sub}/." "${local_dir}/" || return 1 ;;
     none)  return 1 ;;
   esac
 }

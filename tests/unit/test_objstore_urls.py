@@ -116,3 +116,69 @@ def test_every_azcopy_copy_of_a_directory_passes_recursive():
 def test_bash_syntax_is_valid():
     for path in (OBJSTORE, LAUNCH):
         subprocess.run(["bash", "-n", str(path)], check=True, capture_output=True)
+
+
+def test_push_uploads_shards_before_markers():
+    """The marker-last invariant has to survive the network hop, not just the local disk.
+
+    A single recursive upload transfers files in whatever order the tool picks, so a
+    ".done.json" can land in blob storage before the shard it vouches for. If the VM is then
+    evicted -- and with --eviction-policy Delete its disk is gone -- the next worker sees that
+    marker, concludes the chunk is finished, and skips it forever: recorded complete, data
+    nowhere. So the push must be two passes, markers second.
+    """
+    code = _code_lines(OBJSTORE)
+    start = next(i for i, ln in enumerate(code) if ln.startswith("objstore_push()"))
+    end = next(i for i, ln in enumerate(code[start + 1 :], start + 1) if ln.startswith("}"))
+    body = code[start : end + 1]
+
+    for backend, exclude, include in (
+        ("azure)", '--exclude-pattern "*.done.json"', '--include-pattern "*.done.json"'),
+        ("s3)", '--exclude "*.done.json"', '--include "*.done.json"'),
+    ):
+        bstart = next(i for i, ln in enumerate(body) if ln.strip().startswith(backend))
+        seg = " ".join(body[bstart : bstart + 10])
+        assert exclude in seg, f"{backend} push must first upload everything EXCEPT markers"
+        assert include in seg, f"{backend} push must then upload markers"
+        assert seg.index(exclude) < seg.index(include), (
+            f"{backend}: the markers-only pass must come SECOND, or a marker can precede "
+            f"its shard into storage"
+        )
+
+
+def test_marker_pull_never_fetches_shards():
+    """Resume must stay cheap: markers are kilobytes, shards are hundreds of GB."""
+    code = _code_lines(OBJSTORE)
+    start = next(i for i, ln in enumerate(code) if ln.startswith("objstore_pull_markers()"))
+    end = next(i for i, ln in enumerate(code[start + 1 :], start + 1) if ln.startswith("}"))
+    body = " ".join(code[start : end + 1])
+    assert '--include-pattern "*.done.json"' in body
+    assert '--include "*.done.json"' in body
+
+
+def test_per_vm_verify_is_not_deep():
+    """A resumed VM holds everyone's markers but only its own shards.
+
+    Deep verify checksums every shard it has a marker for, so on a resumed VM it would fail
+    on each absent one and bury any real problem. The deep pass belongs on the analysis
+    machine against the complete tree.
+    """
+    code = " ".join(_code_lines(LAUNCH))
+    assert "soe.cli verify" in code
+    assert "--no-deep" in code, "the per-VM verify must be marker-level only"
+
+
+def test_background_helpers_do_not_inherit_the_callers_stdout():
+    """A background job that inherits stdout keeps the pipe open after the script exits.
+
+    Any caller that captures output -- CI, `az vm run-command`,
+    subprocess.run(capture_output=True) -- then blocks until the helper happens to die rather
+    than when the run finishes. The periodic sync sleeps for minutes at a time, so in practice
+    that reads as a hang. Both helpers must redirect their own output.
+    """
+    code = _code_lines(LAUNCH)
+    backgrounded = [ln for ln in code if ln.rstrip().endswith("&")]
+    assert backgrounded, "expected some backgrounded helpers to check"
+    for ln in backgrounded:
+        # The generate workers already redirect to per-worker logs.
+        assert ">" in ln, f"backgrounded without redirecting stdout: {ln.strip()}"

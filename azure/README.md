@@ -132,11 +132,22 @@ not universally `length`, and `max_tokens_effective` what you expect.
 
 ## 8. Analysis — anywhere, no GPU
 
+Pull the **complete** tree first. Each VM only ever held its own shards plus everyone's
+markers, so the deep verify — and the cross-machine checks it performs: global seed
+uniqueness, equal *n* per problem, one `problem_uid` per problem index — can only run here,
+once, against everything.
+
 ```bash
-soe verify  configs/experiments/stage1_tierA.yaml --root "$SOE_ROOT"
-soe figures configs/experiments/stage1_tierA.yaml --root "$SOE_ROOT" \
+mkdir -p runs && cd runs
+azcopy copy "$AZ_CONTAINER_URL/*" . --recursive          # shards AND markers this time
+
+soe verify  configs/experiments/stage1_tierA.yaml --root . # deep by default; must pass
+soe figures configs/experiments/stage1_tierA.yaml --root . \
     --base qwen25m7b_base --rl qwen25m7b_simplerl0
 ```
+
+The per-VM verify inside `launch_node.sh` deliberately runs `--no-deep`: on a resumed VM most
+shards are not local, and a deep check would report a failure for every absent one.
 
 ## 9. Tear down
 

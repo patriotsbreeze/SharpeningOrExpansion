@@ -68,10 +68,10 @@ PREEMPT_SENTINEL="${PREEMPT_SENTINEL:-/var/run/soe_preempt}"
 react_to_eviction() {
   while true; do
     if [[ -f "${PREEMPT_SENTINEL}" ]]; then
-      echo "[launch] eviction notice seen -- final sync" | tee -a "${LOGDIR}/eviction.log"
-      cat "${PREEMPT_SENTINEL}" >> "${LOGDIR}/eviction.log" 2>/dev/null || true
+      echo "[launch] eviction notice seen -- final sync"
+      cat "${PREEMPT_SENTINEL}" 2>/dev/null || true
       objstore_push "${EXPDIR}" "exp=${EXP}" || true
-      echo "[launch] final sync complete" | tee -a "${LOGDIR}/eviction.log"
+      echo "[launch] final sync complete"
       return 0
     fi
     sleep 1
@@ -125,14 +125,31 @@ python -m soe.cli plan "${CONFIG}" --root "${ROOT}"
 SYNC_PID=""
 WATCH_PID=""
 if objstore_configured; then
-  ( while true; do sleep "${SYNC_INTERVAL}"; objstore_push "${EXPDIR}" "exp=${EXP}" || true; done ) &
+  # Both helpers redirect their own output. A background job that inherits this script's
+  # stdout keeps the pipe open after the script exits, so any caller that captures output --
+  # a CI harness, `az vm run-command`, subprocess.run(capture_output=True) -- blocks until
+  # the helper happens to die rather than when the run actually finishes.
+  ( while true; do
+      sleep "${SYNC_INTERVAL}"
+      objstore_push "${EXPDIR}" "exp=${EXP}" || true
+    done ) >> "${LOGDIR}/sync.log" 2>&1 &
   SYNC_PID=$!
-  react_to_eviction & WATCH_PID=$!
+  react_to_eviction >> "${LOGDIR}/eviction.log" 2>&1 &
+  WATCH_PID=$!
 fi
 cleanup() {
-  [[ -n "${SYNC_PID}" ]] && kill "${SYNC_PID}" 2>/dev/null || true
-  [[ -n "${WATCH_PID}" ]] && kill "${WATCH_PID}" 2>/dev/null || true
-  objstore_configured && objstore_push "${EXPDIR}" "exp=${EXP}" || true
+  # Reap the helpers FIRST, so the final push does not race the periodic one and nothing is
+  # left holding an inherited file descriptor.
+  local pid
+  for pid in "${SYNC_PID}" "${WATCH_PID}"; do
+    [[ -n "${pid}" ]] || continue
+    kill "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
+  done
+  SYNC_PID="" ; WATCH_PID=""
+  if objstore_configured; then
+    objstore_push "${EXPDIR}" "exp=${EXP}" || true
+  fi
 }
 trap cleanup EXIT TERM INT
 
@@ -156,5 +173,15 @@ echo "[launch] generation finished (fail=${fail})"
 
 # ---------------------------------------------------------------- grade + verify
 python -m soe.cli grade  "${CONFIG}" --root "${ROOT}" --graders "${GRADERS}"
-python -m soe.cli verify "${CONFIG}" --root "${ROOT}" --no-require-complete || true
+
+# --no-deep is required here, not a shortcut. Resume pulls only the MARKERS from blob
+# storage, never the shards, so on any resumed VM most shards this machine has a marker for
+# are not on its local disk. A deep verify reads every shard to check its checksum and would
+# report a failure for each absent one -- drowning any real problem in noise.
+#
+# The full deep verify belongs on the analysis machine, once, against the complete tree
+# pulled down from blob storage (azure/README.md step 8). That is also the only place where
+# the cross-machine checks -- global seed uniqueness, equal n per problem, one problem_uid
+# per problem index -- can actually see the whole run.
+python -m soe.cli verify "${CONFIG}" --root "${ROOT}" --no-deep --no-require-complete || true
 exit "${fail}"
