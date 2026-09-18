@@ -1,0 +1,205 @@
+# FROZEN MODEL REGISTRY -- append-only.
+#
+# `seed_idx` is baked into every seed in the experiment (see src/soe/seeding.py).
+# Reordering or renumbering this file silently remaps every seed and will produce duplicate
+# samples against existing shards. registry.py guards this with a committed hash; if you must
+# add a model, append it with the next free seed_idx and re-freeze deliberately.
+#
+# Every hf_id below was verified against a primary source (GitHub READMEs of the releasing
+# projects). The casing traps are real: SimpleRL-Zero has hyphens in "Qwen-2.5"; Oat-Zero
+# does not. `soe doctor --registry` resolves all of them against the Hub before any run.
+
+models:
+  - key: qwen25m7b_base
+    seed_idx: 0
+    hf_id: Qwen/Qwen2.5-Math-7B
+    revision: main            # pin to a commit sha before the real run
+    family: qwen25math7b
+    role: base
+    base_of: null
+    rl_step: null
+    native_context_len: 4096  # config.json max_position_embeddings; rope_theta=10000
+    context_len: 4096
+    rope_scaling: null
+    release_date: 2024-09-18
+    prompt_variants: [fewshot4_math, zeroshot_boxed]
+    stop: ["\n\nProblem:", "<|im_end|>", "<|endoftext|>"]
+
+  # C5 robustness arm: same weights, max_position_embeddings extended the way verl/DAPO do it
+  # for training. This is a WEAK control (untuned extrapolation at rope_theta=10000 degrades
+  # quality); retro-truncation of the long models is the primary C5 measure. Kept as appendix.
+  - key: qwen25m7b_base_ext32k
+    seed_idx: 1
+    hf_id: Qwen/Qwen2.5-Math-7B
+    revision: main
+    family: qwen25math7b
+    role: base
+    base_of: null
+    rl_step: null
+    native_context_len: 4096
+    context_len: 32768
+    rope_scaling: {rope_type: yarn, factor: 8.0, original_max_position_embeddings: 4096}
+    release_date: 2024-09-18
+    prompt_variants: [fewshot4_math, zeroshot_boxed]
+    stop: ["\n\nProblem:", "<|im_end|>", "<|endoftext|>"]
+
+  - key: qwen25m7b_simplerl0
+    seed_idx: 2
+    hf_id: hkust-nlp/Qwen-2.5-Math-7B-SimpleRL-Zero   # note: Qwen-2.5, hyphenated
+    revision: main
+    family: qwen25math7b
+    role: rl_zero
+    base_of: qwen25m7b_base
+    rl_step: null
+    native_context_len: 4096
+    context_len: 4096
+    rope_scaling: null
+    release_date: 2025-01-25
+    prompt_variants: [zeroshot_boxed, native_chat]
+    stop: ["<|im_end|>", "<|endoftext|>"]
+
+  - key: qwen25m7b_oatzero
+    seed_idx: 3
+    hf_id: sail/Qwen2.5-Math-7B-Oat-Zero              # note: Qwen2.5, not hyphenated
+    revision: main
+    family: qwen25math7b
+    role: rl_zero
+    base_of: qwen25m7b_base
+    rl_step: null
+    native_context_len: 4096
+    context_len: 4096
+    rope_scaling: null
+    release_date: 2025-03-21
+    prompt_variants: [zeroshot_boxed, native_chat]
+    stop: ["<|im_end|>", "<|endoftext|>"]
+
+  # SFT on R1 traces -- NOT RLVR. Reported as its own arm; pooling it with the zero-RL
+  # checkpoints would conflate two different treatments.
+  # max_position_embeddings is nominally 131072 but rope_theta=10000, so effective context is
+  # far lower. 32768 is DeepSeek's own recommended generation ceiling.
+  - key: r1_distill_q7b
+    seed_idx: 4
+    hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+    revision: main
+    family: qwen25math7b
+    role: distill
+    base_of: qwen25m7b_base
+    rl_step: null
+    native_context_len: 131072
+    context_len: 32768
+    rope_scaling: null
+    release_date: 2025-01-20
+    prompt_variants: [native_chat]
+    stop: ["<|end▁of▁sentence|>"]
+
+  # OLMo 3: the clean family. 65k context on BOTH sides (no truncation confound), a published
+  # pretraining token count (5.93T -- speaks directly to the overtraining question), and
+  # intermediate RL checkpoints exposed as revisions.
+  - key: olmo3_7b_base
+    seed_idx: 5
+    hf_id: allenai/Olmo-3-1025-7B
+    revision: main
+    family: olmo3_7b
+    role: base
+    base_of: null
+    rl_step: null
+    native_context_len: 65536
+    context_len: 32768        # capped for KV budget; identical cap applied to its RL descendant
+    rope_scaling: null
+    release_date: 2025-11-20
+    prompt_variants: [fewshot4_math, zeroshot_boxed]
+    stop: ["\n\nProblem:", "<|endoftext|>"]
+
+  - key: olmo3_7b_rlzero_math
+    seed_idx: 6
+    hf_id: allenai/Olmo-3-7B-RL-Zero-Math
+    revision: main
+    family: olmo3_7b
+    role: rl_zero
+    base_of: olmo3_7b_base
+    rl_step: null
+    native_context_len: 65536
+    context_len: 32768
+    rope_scaling: null
+    release_date: 2025-11-20
+    prompt_variants: [zeroshot_boxed, native_chat]
+    stop: ["<|endoftext|>"]
+
+  # RL-step trajectory. Each revision is a DISTINCT model_key with its own seed_idx -- if these
+  # shared one key the whole sweep would draw correlated samples. Exact revision strings must be
+  # confirmed by `soe doctor --registry`; the step_XXXX format is unverified.
+  - key: olmo3_7b_rlzero_math_s0250
+    seed_idx: 7
+    hf_id: allenai/Olmo-3-7B-RL-Zero-Math
+    revision: step_250
+    family: olmo3_7b
+    role: rl_ckpt
+    base_of: olmo3_7b_base
+    rl_step: 250
+    native_context_len: 65536
+    context_len: 32768
+    rope_scaling: null
+    release_date: 2025-11-20
+    prompt_variants: [zeroshot_boxed]
+    stop: ["<|endoftext|>"]
+
+  - key: olmo3_7b_rlzero_math_s0750
+    seed_idx: 8
+    hf_id: allenai/Olmo-3-7B-RL-Zero-Math
+    revision: step_750
+    family: olmo3_7b
+    role: rl_ckpt
+    base_of: olmo3_7b_base
+    rl_step: 750
+    native_context_len: 65536
+    context_len: 32768
+    rope_scaling: null
+    release_date: 2025-11-20
+    prompt_variants: [zeroshot_boxed]
+    stop: ["<|endoftext|>"]
+
+  - key: olmo3_7b_rlzero_math_s1500
+    seed_idx: 9
+    hf_id: allenai/Olmo-3-7B-RL-Zero-Math
+    revision: step_1500
+    family: olmo3_7b
+    role: rl_ckpt
+    base_of: olmo3_7b_base
+    rl_step: 1500
+    native_context_len: 65536
+    context_len: 32768
+    rope_scaling: null
+    release_date: 2025-11-20
+    prompt_variants: [zeroshot_boxed]
+    stop: ["<|endoftext|>"]
+
+  # Mock models for the CPU smoke path. Never resolved against the Hub.
+  - key: mock_base
+    seed_idx: 62
+    hf_id: mock://base
+    revision: mock
+    family: mock
+    role: base
+    base_of: null
+    rl_step: null
+    native_context_len: 4096
+    context_len: 4096
+    rope_scaling: null
+    release_date: 2024-01-01
+    prompt_variants: [zeroshot_boxed]
+    stop: []
+
+  - key: mock_rl
+    seed_idx: 63
+    hf_id: mock://rl
+    revision: mock
+    family: mock
+    role: rl_zero
+    base_of: mock_base
+    rl_step: null
+    native_context_len: 32768
+    context_len: 32768
+    rope_scaling: null
+    release_date: 2024-01-01
+    prompt_variants: [zeroshot_boxed]
+    stop: []

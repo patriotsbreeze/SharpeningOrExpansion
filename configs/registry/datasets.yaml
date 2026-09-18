@@ -1,0 +1,99 @@
+# FROZEN DATASET REGISTRY -- append-only. Same warning as models.yaml: `seed_idx` is baked
+# into every seed, and `problem_idx` derives from dataset ORDER under the pinned revision.
+#
+# `revision` must be a commit sha before the real run. If MathArena re-pushes a dataset and
+# the revision is "main", problem_idx silently remaps and resume produces duplicate samples
+# against existing shards. The problem manifest stores per-problem content hashes so drift is
+# detected rather than inferred.
+#
+# `release_date` is the COMPETITION date -- the running variable for the C3
+# difference-in-differences. The contamination argument is release-date dominance: these
+# problems did not exist when the weights shipped. That does not depend on Qwen or DeepSeek
+# publishing an honest training cutoff (three of four have no official cutoff at all).
+
+datasets:
+  # --- Tier A: postdates the public release of every checkpoint in the roster ---
+  - key: aime_2026
+    seed_idx: 0
+    hf_path: MathArena/aime_2026
+    hf_config: null
+    split: train
+    revision: main
+    tier: A
+    release_date: 2026-02-05      # AIME I 2026-02-05, AIME II 2026-02-11
+    answer_type: integer_0_999
+    expected_rows: 30             # UNVERIFIED: may be 15 (I only). doctor checks this.
+
+  - key: hmmt_feb_2026
+    seed_idx: 1
+    hf_path: MathArena/hmmt_feb_2026
+    hf_config: null
+    split: train
+    revision: main
+    tier: A
+    release_date: 2026-02-14
+    answer_type: expr
+    expected_rows: 30             # UNVERIFIED
+
+  # --- Tier B: 2025 competitions. Post-release for the Qwen family and OLMo 3 base,
+  #     but NOT clean for any model whose post-training saw AIME'25. Powers the decomposition.
+  - key: final_answer_comps_2025
+    seed_idx: 2
+    hf_path: MathArena/final_answer_comps
+    hf_config: null
+    split: train
+    revision: main
+    tier: B
+    release_date: 2025-02-06
+    answer_type: expr
+    expected_rows: 150            # UNVERIFIED: aggregate of the 2025 final-answer comps
+
+  - key: hmmt_nov_2025
+    seed_idx: 3
+    hf_path: MathArena/hmmt_nov_2025
+    hf_config: null
+    split: train
+    revision: main
+    tier: B
+    release_date: 2025-11-08
+    answer_type: expr
+    expected_rows: 30             # UNVERIFIED
+
+  # --- Contaminated positive control. Deliberately included. ---
+  # If the pass@k curves look qualitatively different here vs. aime_2026 for the same model,
+  # that difference IS the contamination measurement -- a far stronger argument than any
+  # unverifiable training-cutoff claim.
+  - key: aime_2024
+    seed_idx: 4
+    hf_path: HuggingFaceH4/aime_2024
+    hf_config: null
+    split: train
+    revision: main
+    tier: control_contaminated
+    release_date: 2024-02-01
+    answer_type: integer_0_999
+    expected_rows: 30
+
+  # --- Anchor: comparability with published numbers. ---
+  - key: aime_2025
+    seed_idx: 5
+    hf_path: opencompass/AIME2025
+    hf_config: AIME2025-I         # UNVERIFIED: dataset is split I/II; pin which one
+    split: test
+    revision: main
+    tier: anchor
+    release_date: 2025-02-06
+    answer_type: integer_0_999
+    expected_rows: 15
+
+  # --- Mock dataset for the CPU smoke path. Never resolved against the Hub. ---
+  - key: mock_mini
+    seed_idx: 63
+    hf_path: mock://problems_mini
+    hf_config: null
+    split: train
+    revision: mock
+    tier: A
+    release_date: 2026-01-01
+    answer_type: integer_0_999
+    expected_rows: 12
