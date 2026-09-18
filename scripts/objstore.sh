@@ -13,6 +13,16 @@
 # gigabytes every time a spot VM comes back.
 #
 # Backend is chosen by SOE_OBJSTORE: azure (default) | s3 | none.
+#
+# On Azure we use `azcopy copy`, never `azcopy sync` and never `az storage blob sync`.
+# `az storage blob sync` hardcodes --delete-destination=true and does not mention it in
+# --help, so a worker pushing its own partial subtree would DELETE every other worker's
+# shards. `azcopy sync` has the same default. `copy` cannot prune, which is exactly the
+# property we want when N machines write into one container concurrently.
+#
+# Note the flag asymmetry that makes this easy to get wrong: `azcopy copy` defaults
+# --recursive to FALSE (it would silently upload only top-level files and exit 0), while
+# `azcopy sync` defaults it to TRUE. Always pass --recursive explicitly.
 
 set -o pipefail
 
@@ -45,11 +55,14 @@ objstore_push() {
   objstore_configured || { echo "[objstore] not configured; skipping push" >&2; return 0; }
   case "$(objstore_backend)" in
     azure)
-      # --delete-destination=false is explicit and load-bearing: workers push overlapping
-      # subtrees concurrently, and a sync that pruned "extra" destination files would delete
-      # other workers' shards.
-      azcopy sync "${local_dir}" "$(_az_url "${remote_sub}")" \
-        --recursive --delete-destination=false --output-level=essential
+      # copy, not sync: copy has no prune semantics at all, so it cannot remove another
+      # worker's shards. overwrite=ifSourceNewer makes repeated pushes cheap.
+      #
+      # azcopy places the SOURCE DIRECTORY as a child of the destination, so the destination
+      # is the container root and the "${remote_sub}" component comes from the local dir's
+      # own basename. Passing the full remote path here would nest it twice.
+      azcopy copy "${local_dir}" "$(_az_url "")" \
+        --recursive --overwrite=ifSourceNewer --output-level=essential
       ;;
     s3)
       aws s3 sync "${local_dir}" "${S3_URI}/${remote_sub}" --only-show-errors
@@ -64,8 +77,7 @@ objstore_pull_markers() {
   mkdir -p "${local_dir}"
   case "$(objstore_backend)" in
     azure)
-      # copy, not sync: sync would want the whole tree present locally to compare against.
-      azcopy copy "$(_az_url "${remote_sub}")/*" "${local_dir}" \
+      azcopy copy "$(_az_url "${remote_sub}" "/*")" "${local_dir}" \
         --recursive --include-pattern "*.done.json" --overwrite=true --output-level=essential
       ;;
     s3)
@@ -93,19 +105,33 @@ objstore_pull_dir() {
   objstore_configured || return 0
   mkdir -p "${local_dir}"
   case "$(objstore_backend)" in
-    azure) azcopy copy "$(_az_url "${remote_sub}")/*" "${local_dir}" \
+    azure) azcopy copy "$(_az_url "${remote_sub}" "/*")" "${local_dir}" \
              --recursive --overwrite=true --output-level=essential 2>/dev/null || return 1 ;;
     s3)    aws s3 sync "${S3_URI}/${remote_sub}" "${local_dir}" --only-show-errors || return 1 ;;
     none)  return 1 ;;
   esac
 }
 
-# AZ_CONTAINER_URL may or may not carry a SAS query string; splice the path in before it.
+# Build a blob URL.
+#
+# AZ_CONTAINER_URL may carry a SAS query string, so every path component -- including a
+# trailing "/*" wildcard -- has to be spliced in BEFORE the "?". Appending after it silently
+# folds the path into the signature's query and the request fails to authenticate, or worse,
+# targets the wrong prefix.
+#
+#   _az_url "exp=s1"        -> https://acct.blob.../soe/exp=s1?sv=...
+#   _az_url "exp=s1" "/*"   -> https://acct.blob.../soe/exp=s1/*?sv=...
+#   _az_url ""              -> https://acct.blob.../soe?sv=...
 _az_url() {
-  local sub="$1" base="${AZ_CONTAINER_URL}"
+  local sub="${1:-}" suffix="${2:-}" base="${AZ_CONTAINER_URL}" path query
   if [[ "${base}" == *"?"* ]]; then
-    echo "${base%%\?*}/${sub}?${base#*\?}"
+    path="${base%%\?*}"
+    query="?${base#*\?}"
   else
-    echo "${base}/${sub}"
+    path="${base}"
+    query=""
   fi
+  path="${path%/}"
+  [[ -n "${sub}" ]] && path="${path}/${sub}"
+  echo "${path}${suffix}${query}"
 }

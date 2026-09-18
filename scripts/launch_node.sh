@@ -53,22 +53,28 @@ for w in "${WORKERS[@]}"; do
 done
 echo "[launch] exp=${EXP} mode=${MODE} workers=[${WORKERS[*]}] of ${NWORKERS} root=${ROOT}"
 
-# ---------------------------------------------------------------- preemption watcher
-# Azure Spot gives roughly 30 seconds of notice through the Scheduled Events metadata
-# endpoint, and an eviction is not guaranteed to arrive as a catchable signal -- so polling
-# the endpoint is what actually saves the last sync interval of work, not a bash trap alone.
-watch_for_eviction() {
-  local url="http://169.254.169.254/metadata/scheduledevents?api-version=2020-07-01"
+# ---------------------------------------------------------------- preemption reaction
+# The DETECTION half lives in azure/bootstrap.sh, which starts a systemd poller at boot and
+# writes any notice to a sentinel file. That split matters: Scheduled Events is lazily
+# enabled, so the endpoint needs ~2 minutes before it answers and ~5 before events flow, and
+# it self-disables after 24h without polling. A watcher that only started when this script
+# ran would be blind through exactly the window where an early eviction costs the most.
+#
+# Here we only REACT: notice the sentinel and get the artifacts out. Azure gives roughly 30
+# seconds, and an eviction is not guaranteed to arrive as a catchable signal, so the trap
+# below is a backstop rather than the mechanism.
+PREEMPT_SENTINEL="${PREEMPT_SENTINEL:-/var/run/soe_preempt}"
+
+react_to_eviction() {
   while true; do
-    local body
-    body=$(curl -s -m 5 -H Metadata:true "${url}" 2>/dev/null || true)
-    if [[ "${body}" == *'"EventType":"Preempt"'* || "${body}" == *'"EventType": "Preempt"'* ]]; then
-      echo "[launch] PREEMPT notice received -- final sync" | tee -a "${LOGDIR}/eviction.log"
+    if [[ -f "${PREEMPT_SENTINEL}" ]]; then
+      echo "[launch] eviction notice seen -- final sync" | tee -a "${LOGDIR}/eviction.log"
+      cat "${PREEMPT_SENTINEL}" >> "${LOGDIR}/eviction.log" 2>/dev/null || true
       objstore_push "${EXPDIR}" "exp=${EXP}" || true
-      echo "[launch] final sync done" | tee -a "${LOGDIR}/eviction.log"
+      echo "[launch] final sync complete" | tee -a "${LOGDIR}/eviction.log"
       return 0
     fi
-    sleep 5
+    sleep 1
   done
 }
 
@@ -121,7 +127,7 @@ WATCH_PID=""
 if objstore_configured; then
   ( while true; do sleep "${SYNC_INTERVAL}"; objstore_push "${EXPDIR}" "exp=${EXP}" || true; done ) &
   SYNC_PID=$!
-  watch_for_eviction & WATCH_PID=$!
+  react_to_eviction & WATCH_PID=$!
 fi
 cleanup() {
   [[ -n "${SYNC_PID}" ]] && kill "${SYNC_PID}" 2>/dev/null || true

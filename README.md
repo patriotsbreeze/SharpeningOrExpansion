@@ -57,14 +57,28 @@ bootstrap simultaneously — before a single GPU-hour is spent.
 
 ## Running for real
 
-See **[aws/README.md](aws/README.md)**. Short version:
+See **[azure/README.md](azure/README.md)** — it leads with the three gates (subscription
+eligibility, quota, subscription offering), because each fails differently and quota has a
+lead time in days. Short version:
 
 ```bash
-soe doctor --registry                              # resolve every HF id first. Costs nothing.
-./aws/launch.sh                                    # p5.48xlarge spot, on-demand fallback
-scripts/launch_node.sh configs/experiments/pilot_gpu.yaml 1        # ~$2 shakeout
-scripts/launch_node.sh configs/experiments/stage1_tierA.yaml       # the headline
+soe doctor --registry                       # resolve every HF id first. Costs nothing.
+export LOCATION=eastus2 STORAGE_ACCOUNT=<acct> FLEET=4
+./azure/launch.sh                           # NC40ads_H100_v5 spot, one VM per worker
+# on a node:
+SOE_WORKER=0 scripts/launch_node.sh configs/experiments/pilot_gpu.yaml   # shakeout
+./azure/teardown.sh                         # the only complete teardown
 ```
+
+**Topology: a fleet of single-GPU VMs, not one multi-GPU node.** This workload runs
+`tensor_parallel_size=1` with one engine per GPU and no inter-worker communication, so an
+8-GPU node buys nothing — and concentrates risk, since one eviction takes every worker with
+it. Single-GPU spot VMs are also far easier to actually get.
+
+**The budget is not the constraint; capacity is.** Even paying full pay-as-you-go with zero
+spot capacity lands inside $600, so falling back to on-demand beats losing days waiting for
+spot. Prices in the runbook are flagged unverified — the authoring environment could not reach
+any pricing source, and the indexed aggregators disagree by 2×.
 
 ## Design decisions that carry the results
 

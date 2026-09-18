@@ -1,5 +1,6 @@
-# Provider-agnostic image. The AWS path uses bootstrap.sh on a Deep Learning AMI; this exists
-# for Batch/ECS/Kubernetes or for pinning the exact toolchain.
+# Provider-agnostic image. The primary Azure path uses bootstrap.sh on the Ubuntu-HPC
+# marketplace image, which already ships the NVIDIA driver and CUDA. This Dockerfile exists
+# for Azure Batch / AKS, or for pinning the exact toolchain independently of the image.
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
