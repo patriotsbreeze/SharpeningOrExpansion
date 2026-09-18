@@ -93,6 +93,10 @@ def verify_experiment(
     seeds_by_arm: dict[tuple, Counter] = defaultdict(Counter)
     n_by_arm_problem: dict[tuple, Counter] = defaultdict(Counter)
     fingerprints: dict[tuple, set] = defaultdict(set)
+    # (dataset_key, problem_idx) -> the set of problem_uids any shard claims for it. On a
+    # fleet of independent VMs each machine builds its own problem manifest, so this is the
+    # check that catches two machines disagreeing about WHICH problem an index refers to.
+    uid_by_problem: dict[tuple, set] = defaultdict(set)
     total_rows = 0
 
     for u in done:
@@ -114,6 +118,7 @@ def verify_experiment(
             for row in read_shard(path):
                 seeds_by_arm[arm][row["seed"]] += 1
                 n_by_arm_problem[arm][row["problem_idx"]] += 1
+                uid_by_problem[(u.dataset_key, row["problem_idx"])].add(row["problem_uid"])
                 total_rows += 1
 
     rep.stats["rows"] = total_rows
@@ -127,6 +132,18 @@ def verify_experiment(
                     f"pass@k estimator is biased. Most likely a resume wrote a chunk twice "
                     f"under different chunking. Delete the affected shards and regenerate."
                 )
+
+        drifted = {k: v for k, v in uid_by_problem.items() if len(v) > 1}
+        if drifted:
+            (dataset_key, pidx), uids = next(iter(drifted.items()))
+            rep.fail(
+                f"{len(drifted)} problem indices resolve to more than one problem_uid "
+                f"(e.g. {dataset_key} problem_idx={pidx} -> {sorted(uids)}). Two machines "
+                f"built different problem manifests, so the SAME seed denotes DIFFERENT "
+                f"problems in different shards. Pin the dataset by commit sha rather than a "
+                f"branch, distribute one manifest to the whole fleet, and regenerate the "
+                f"affected arms -- these samples cannot be pooled."
+            )
 
         for arm, counter in n_by_arm_problem.items():
             vals = set(counter.values())

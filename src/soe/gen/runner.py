@@ -154,6 +154,18 @@ def run_experiment(
     from soe.gen.planner import build_plan, remaining_units
     from soe.registry import load_models
 
+    if worker is not None and not 0 <= worker < cfg.n_workers:
+        # On a fleet of single-GPU VMs this is the difference between a loud failure and a
+        # GPU instance sitting idle at full price: an out-of-range index owns no problem
+        # shard, so every filter below would quietly return nothing.
+        raise ValueError(
+            f"worker index {worker} is outside the configured fleet of {cfg.n_workers} "
+            f"(valid: 0..{cfg.n_workers - 1}). Either pass a valid index, or change "
+            f"n_workers in {cfg.exp_id} -- but note that n_workers changes the problem "
+            f"partition, so it must NOT be changed against an artifact tree that already "
+            f"has shards in it."
+        )
+
     models = load_models()
     n_problems = {k: len(v) for k, v in problems_by_dataset.items()}
     units = build_plan(cfg, n_problems)

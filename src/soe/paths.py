@@ -1,7 +1,8 @@
 """Artifact path construction.
 
-The local root and the S3 prefix are identical below the root, so syncing is a plain
-``aws s3 sync``. Every builder has a matching parser and ``parse(build(x)) == x`` is a test.
+The local root and the object-store prefix are identical below the root, so syncing is a
+plain recursive copy in either direction, with no path rewriting to get wrong. Every builder
+has a matching parser and ``parse(build(x)) == x`` is a test.
 """
 
 from __future__ import annotations

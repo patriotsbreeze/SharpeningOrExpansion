@@ -1,7 +1,8 @@
 """Completion markers -- the resume primitive.
 
-Resume is: sync only ``*.done.json`` from S3 (kilobytes), then take ``plan.jsonl`` minus the
-markers that already exist. No lock server, no database, no coordination between workers.
+Resume is: pull only ``*.done.json`` from the object store (kilobytes, never the shards),
+then take ``plan.jsonl`` minus the markers that already exist. No lock server, no database, no
+coordination between workers.
 """
 
 from __future__ import annotations
