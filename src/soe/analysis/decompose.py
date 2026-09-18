@@ -121,7 +121,7 @@ def decompose(
     v = {S: g_empty - G(S) for S in _all_subsets(confounds)}
 
     shapley = {}
-    for i, c in enumerate(confounds):
+    for c in confounds:
         others = [x for x in confounds if x != c]
         total = 0.0
         for r in range(len(others) + 1):

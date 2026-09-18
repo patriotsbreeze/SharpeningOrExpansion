@@ -65,5 +65,7 @@ def test_n_total_must_divide_evenly_into_chunks():
 
 
 def test_extra_keys_rejected():
-    with pytest.raises(Exception):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="typo"):
         SamplingSpec(n_total=64, chunk_size=16, temperature=1.0, max_new_tokens=512, typo=1)

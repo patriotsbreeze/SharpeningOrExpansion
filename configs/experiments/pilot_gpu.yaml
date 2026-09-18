@@ -1,0 +1,20 @@
+# STAGE 0 -- the ~$2 shakeout that runs BEFORE the full matrix.
+#
+# Its job is to surface prompt-template surprises and the 4096-token budget on real weights,
+# where the cost of being wrong is a couple of dollars rather than a day of GPU time.
+exp_id: pilot_gpu
+description: Two models, five problems, n=16. Validates weights, templates and budgeting.
+backend: vllm
+n_workers: 1
+
+sampling:
+  n_total: 16
+  chunk_size: 8
+  temperature: 1.0
+  top_p: 1.0
+  max_new_tokens: 3000
+  max_prompt_tokens: 1000
+
+arms:
+  - {model_key: qwen25m7b_base,      dataset_key: aime_2026, variant: zeroshot_boxed}
+  - {model_key: qwen25m7b_simplerl0, dataset_key: aime_2026, variant: zeroshot_boxed}

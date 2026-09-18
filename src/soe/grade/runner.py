@@ -36,9 +36,10 @@ def grade_rows(
     problems: dict[int, Problem],
     *,
     graders: list[str],
-    policies: list[str] = list(POLICIES),
+    policies: list[str] | None = None,
     nullgold_seed: int = 0,
 ) -> pd.DataFrame:
+    policies = list(POLICIES) if policies is None else policies
     idxs = sorted(problems)
     golds = [problems[i].answer for i in idxs]
     null_map = dict(zip(idxs, permuted_golds(golds, seed=nullgold_seed), strict=True))
@@ -117,8 +118,9 @@ def grade_shard(
     ref: ChunkRef,
     problems: dict[int, Problem],
     graders: list[str],
-    policies: list[str] = list(POLICIES),
+    policies: list[str] | None = None,
 ) -> Path | None:
+    policies = list(POLICIES) if policies is None else policies
     gid = grading_id(graders, policies)
     out_path = grade_chunk(root, exp_id, gid, ref)
     if is_done(out_path):

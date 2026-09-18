@@ -1,0 +1,24 @@
+% This section is the paper's spine: it is what makes the work an adjudication rather than
+% another entry in the debate. Each subsection states the explanation, who proposed it, and
+% the operator that removes it.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{llp{6.2cm}}
+\toprule
+ & Explanation & Removed by \\
+\midrule
+C1 & Support shrinkage (sharpening) & --- (the residual) \\
+C2 & Overtraining on saturated problems & Restrict to $p_{\text{base}} \in (0.05, 0.80)$ \\
+C3 & Contamination of the base's coverage & Restrict to post-release problems \\
+C4 & Answer-only scoring rewards guesses & Null-gold false-positive correction \\
+C5 & Truncation (4k base vs.\ 32k descendants) & Retro-truncate both arms to a common budget \\
+C6 & Matched-$k$ is not matched-compute & Compare at equal total sampled tokens \\
+C7 & Prompt/template mismatch & Score both arms on the shared variant \\
+\bottomrule
+\end{tabular}
+\caption{The seven live explanations. C3, C5, C6 and C7 have not previously been isolated.}
+\label{tab:confounds}
+\end{table}
+
+\todo{one short paragraph per confound}

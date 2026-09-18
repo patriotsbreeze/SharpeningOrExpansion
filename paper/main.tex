@@ -1,0 +1,64 @@
+% ICLR 2027 submission.
+%
+% The official style file is NOT vendored here: download iclr2027_conference.sty and .bst from
+% the ICLR Master-Template repository and drop them beside this file. Modifying the style file
+% is explicit grounds for rejection, so do not edit it.
+\documentclass{article}
+\usepackage{iclr2027_conference,times}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage[capitalize]{cleveref}
+\usepackage{xcolor}
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+
+\title{Sharpening, Expansion, or Artifact? \\ A Confound Decomposition of the pass@$k$ Crossover in RLVR}
+
+\author{Anonymous}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+% Keep in sync with paper/abstract.md, which is what was registered at the abstract deadline.
+\input{sections/abstract}
+\end{abstract}
+
+\section{Introduction}\label{sec:intro}
+\input{sections/intro}
+
+\section{Background and Related Work}\label{sec:related}
+\input{sections/related}
+
+\section{Seven Explanations for the Crossover}\label{sec:confounds}
+\input{sections/confounds}
+
+\section{Method: Adjustment Lattice and Shapley Attribution}\label{sec:method}
+\input{sections/method}
+
+\section{Experimental Setup}\label{sec:setup}
+\input{sections/setup}
+
+\section{Results}\label{sec:results}
+\input{sections/results}
+
+\section{Limitations}\label{sec:limitations}
+\input{sections/limitations}
+
+\section{Conclusion}\label{sec:conclusion}
+\input{sections/conclusion}
+
+\subsubsection*{Use of AI Assistants}
+% Mandatory for ICLR 2027 and does NOT count against the 9-page limit.
+\input{sections/ai_use}
+
+\bibliography{refs}
+\bibliographystyle{iclr2027_conference}
+
+\appendix
+\section{Appendix}
+\input{sections/appendix}
+
+\end{document}

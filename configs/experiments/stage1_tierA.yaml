@@ -1,0 +1,43 @@
+# STAGE 1 -- the headline, and independently publishable on its own.
+#
+# Tier A (AIME 2026 + HMMT Feb 2026) postdates the public release of every checkpoint here,
+# plus the deliberately contaminated AIME 2024 positive control and the AIME 2025 anchor.
+# If capacity or budget runs short, this stage alone supports the paper.
+#
+# n=512 on the base arms: they run at 4k context so the extra samples are cheap (~1 GPU-hr),
+# and the crossover is a large-k claim that needs a visible asymptote rather than a curve
+# that stops exactly where the interesting behaviour starts.
+exp_id: stage1_tierA
+description: Qwen2.5-Math-7B family on Tier A + contamination control, n=256 (512 for base).
+backend: vllm
+n_workers: 8
+
+sampling:
+  n_total: 256
+  chunk_size: 16          # ~5-15 min per shard: the unit of work lost to a spot preemption
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_new_tokens: 3000    # Qwen2.5-Math-7B ctx is 4096 TOTAL; runner clamps per prompt anyway
+  max_prompt_tokens: 1000
+
+arms:
+  # --- base, both prompt variants (C7) and n=512 ---
+  - {model_key: qwen25m7b_base, dataset_key: aime_2026,    variant: zeroshot_boxed,
+     sampling_override: {n_total: 512, chunk_size: 16, temperature: 1.0, max_new_tokens: 3000, max_prompt_tokens: 1000}}
+  - {model_key: qwen25m7b_base, dataset_key: hmmt_feb_2026, variant: zeroshot_boxed,
+     sampling_override: {n_total: 512, chunk_size: 16, temperature: 1.0, max_new_tokens: 3000, max_prompt_tokens: 1000}}
+  - {model_key: qwen25m7b_base, dataset_key: aime_2024,    variant: zeroshot_boxed}
+  - {model_key: qwen25m7b_base, dataset_key: aime_2025,    variant: zeroshot_boxed}
+  - {model_key: qwen25m7b_base, dataset_key: aime_2026,    variant: fewshot4_math}
+  - {model_key: qwen25m7b_base, dataset_key: aime_2024,    variant: fewshot4_math}
+
+  # --- zero-RL descendants of that exact base ---
+  - {model_key: qwen25m7b_simplerl0, dataset_key: aime_2026,     variant: zeroshot_boxed}
+  - {model_key: qwen25m7b_simplerl0, dataset_key: hmmt_feb_2026, variant: zeroshot_boxed}
+  - {model_key: qwen25m7b_simplerl0, dataset_key: aime_2024,     variant: zeroshot_boxed}
+  - {model_key: qwen25m7b_simplerl0, dataset_key: aime_2025,     variant: zeroshot_boxed}
+  - {model_key: qwen25m7b_oatzero,   dataset_key: aime_2026,     variant: zeroshot_boxed}
+  - {model_key: qwen25m7b_oatzero,   dataset_key: hmmt_feb_2026, variant: zeroshot_boxed}
+  - {model_key: qwen25m7b_oatzero,   dataset_key: aime_2024,     variant: zeroshot_boxed}
+  - {model_key: qwen25m7b_oatzero,   dataset_key: aime_2025,     variant: zeroshot_boxed}

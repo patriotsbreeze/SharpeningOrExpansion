@@ -28,8 +28,8 @@ def write_marker(
     started_at: str,
 ) -> Path:
     """Write the marker. Callers MUST have already durably written the data file."""
-    from soe.paths import marker_for
     from soe.io.shards import _atomic_write
+    from soe.paths import marker_for
 
     if not data_path.exists():
         raise RuntimeError(

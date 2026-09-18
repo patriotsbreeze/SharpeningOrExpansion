@@ -1,0 +1,31 @@
+# STAGE 2 -- the clean family, plus the distill arm.
+#
+# OLMo 3 runs at the SAME context on both sides, so the base/RL comparison here carries no
+# truncation confound at all. Contrasting its decomposition against the Qwen family's is the
+# cleanest available evidence on how much of the published crossover is C5.
+#
+# R1-Distill is SFT on R1 traces, not RLVR. It is reported as its own arm; its 32k budget
+# against the Qwen base's 4k is the C5/C6 asymmetry in its most extreme form.
+exp_id: stage2_olmo_distill
+description: OLMo 3 base/RL-Zero pair (matched context) and DeepSeek-R1-Distill on Tier A.
+backend: vllm
+n_workers: 8
+
+sampling:
+  n_total: 256
+  chunk_size: 8           # longer generations -> smaller chunks to hold shard wall-time down
+  temperature: 1.0
+  top_p: 1.0
+  max_new_tokens: 16000
+  max_prompt_tokens: 1500
+
+arms:
+  - {model_key: olmo3_7b_base,        dataset_key: aime_2026,     variant: zeroshot_boxed}
+  - {model_key: olmo3_7b_base,        dataset_key: hmmt_feb_2026, variant: zeroshot_boxed}
+  - {model_key: olmo3_7b_base,        dataset_key: aime_2024,     variant: zeroshot_boxed}
+  - {model_key: olmo3_7b_rlzero_math, dataset_key: aime_2026,     variant: zeroshot_boxed}
+  - {model_key: olmo3_7b_rlzero_math, dataset_key: hmmt_feb_2026, variant: zeroshot_boxed}
+  - {model_key: olmo3_7b_rlzero_math, dataset_key: aime_2024,     variant: zeroshot_boxed}
+  - {model_key: r1_distill_q7b,       dataset_key: aime_2026,     variant: native_chat}
+  - {model_key: r1_distill_q7b,       dataset_key: hmmt_feb_2026, variant: native_chat}
+  - {model_key: r1_distill_q7b,       dataset_key: aime_2024,     variant: native_chat}

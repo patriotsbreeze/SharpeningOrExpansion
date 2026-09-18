@@ -1,0 +1,16 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.11 .venv
+      # CPU extras only. If vllm or torch ever reach this environment, test_import_hygiene
+      # stops being able to prove that grading and analysis run without GPU packages.
+      - run: uv pip install --python .venv/bin/python -e ".[dev]"
+      - run: .venv/bin/python -m ruff check src tests
+      - run: PYTHONPATH=src .venv/bin/python -m pytest -q
+      - run: PYTHONPATH=src make smoke

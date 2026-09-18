@@ -1,0 +1,26 @@
+# STAGE 3 -- pass@k as a function of RL steps. First on the cut list, highest novelty.
+#
+# Every other paper in this debate compares two endpoints. OLMo 3 publishes intermediate RL
+# checkpoints, so the boundary can be traced as a TRAJECTORY. That is the direct test of both
+# the overtraining account (2606.15455: the high-k decline should appear only once problems
+# saturate) and the two-stage account (2510.04028: early shrinkage, later expansion).
+#
+# Each step revision is a distinct model_key with its own frozen seed_idx -- otherwise every
+# checkpoint would draw the same samples and the trajectory would be internally correlated.
+exp_id: stage3_rl_trajectory
+description: OLMo 3 RL-Zero-Math intermediate checkpoints on Tier A.
+backend: vllm
+n_workers: 8
+
+sampling:
+  n_total: 256
+  chunk_size: 8
+  temperature: 1.0
+  top_p: 1.0
+  max_new_tokens: 16000
+  max_prompt_tokens: 1500
+
+arms:
+  - {model_key: olmo3_7b_rlzero_math_s0250, dataset_key: aime_2026, variant: zeroshot_boxed}
+  - {model_key: olmo3_7b_rlzero_math_s0750, dataset_key: aime_2026, variant: zeroshot_boxed}
+  - {model_key: olmo3_7b_rlzero_math_s1500, dataset_key: aime_2026, variant: zeroshot_boxed}

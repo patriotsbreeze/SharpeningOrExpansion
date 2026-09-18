@@ -17,7 +17,7 @@ from soe.analysis.adjustments import AnalysisState
 from soe.analysis.bootstrap import DEFAULT_KS, bootstrap_gap
 from soe.analysis.crossover import bootstrap_crossover
 from soe.analysis.decompose import bootstrap_decompose
-from soe.analysis.support import answer_breadth, hard_zero_2x2, solve_rate_cdf
+from soe.analysis.support import hard_zero_2x2, solve_rate_cdf
 from soe.analysis.tensors import build_tensor
 
 

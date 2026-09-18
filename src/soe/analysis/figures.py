@@ -81,35 +81,49 @@ def plot_gap_with_ci(boot: dict, out: Path, *, title: str = ""):
 def plot_shapley_waterfall(decomp, out: Path, *, ci: dict | None = None, title: str = ""):
     """The headline figure: how the raw gap decomposes, confound by confound.
 
-    Bars are the Shapley contributions; the final bar is the unexplained residual, which is
-    the estimate of genuine support shrinkage (C1).
+    A true waterfall. The leftmost bar is the raw base-minus-RLVR gap; each confound bar is a
+    step that removes its Shapley contribution; the rightmost bar is the unexplained residual,
+    which is the estimate of genuine support shrinkage (C1). By Shapley efficiency the steps
+    land exactly on the residual, so the figure is a visual proof of the additive identity.
+
+    Error bars are drawn on each step's own magnitude at that step's position, not on the
+    cumulative total -- a CI on a cumulative position would not be the quantity being estimated.
     """
-    rows = decomp.as_rows()
+    rows = [r for r in decomp.as_rows() if r["confound"] != "C1"]
     labels = [r["confound"] for r in rows]
     vals = [r["shapley"] for r in rows]
 
-    fig, ax = plt.subplots(figsize=(4.6, 2.9))
-    running = decomp.raw_gap
-    for i, (lab, v) in enumerate(zip(labels, vals, strict=True)):
-        is_resid = lab == "C1"
-        if is_resid:
-            ax.bar(i, v, bottom=0, color="0.35", width=0.62)
-        else:
-            ax.bar(i, -v, bottom=running, color=BASE_C if v < 0 else RL_C, width=0.62)
-            running -= v
-        if ci and lab in ci:
-            lo, hi = ci[lab]
-            if np.isfinite(lo) and np.isfinite(hi):
-                mid = v if is_resid else running + v / 2
-                ax.plot([i, i], [mid - abs(v - lo) / 2, mid + abs(hi - v) / 2],
-                        color="0.15", lw=1.0)
+    fig, ax = plt.subplots(figsize=(5.2, 3.1))
+    n = len(rows)
+    xs = range(n + 2)
 
-    ax.axhline(decomp.raw_gap, color="0.55", lw=0.8, ls="--")
-    ax.annotate("raw gap", xy=(-0.4, decomp.raw_gap), fontsize=6.5, color="0.45", va="bottom")
-    ax.axhline(0, color="0.4", lw=0.9)
-    ax.set_xticks(range(len(labels)))
-    ax.set_xticklabels(labels, fontsize=8)
-    ax.set_ylabel("contribution to base $-$ RLVR gap")
+    # Anchor bar: the raw gap.
+    ax.bar(0, decomp.raw_gap, color="0.55", width=0.62)
+
+    running = decomp.raw_gap
+    for i, v in enumerate(vals, start=1):
+        bottom, top = running - v, running
+        ax.bar(i, -v, bottom=running, width=0.62,
+               color=BASE_C if v < 0 else RL_C, alpha=0.9)
+        ax.plot([i - 0.31 - 0.18, i - 0.31], [top, top], color="0.6", lw=0.7)
+        if ci and labels[i - 1] in ci:
+            lo, hi = ci[labels[i - 1]]
+            if np.isfinite(lo) and np.isfinite(hi):
+                # The step ends at `bottom`; the CI on the step size maps to [running-hi, running-lo].
+                ax.plot([i, i], [running - hi, running - lo], color="0.12", lw=1.1)
+        running = bottom
+
+    # Closing bar: the residual. Shapley efficiency means `running` already equals it.
+    ax.bar(n + 1, decomp.residual_gap, color="0.3", width=0.62)
+    if ci and "C1" in ci:
+        lo, hi = ci["C1"]
+        if np.isfinite(lo) and np.isfinite(hi):
+            ax.plot([n + 1, n + 1], [lo, hi], color="0.12", lw=1.1)
+
+    ax.axhline(0, color="0.35", lw=0.9)
+    ax.set_xticks(list(xs))
+    ax.set_xticklabels(["raw\ngap", *labels, "C1\nresidual"], fontsize=7.5)
+    ax.set_ylabel("contribution to base $-$ RLVR pass@$k$")
     if title:
         ax.set_title(title, fontsize=9)
     return _save(fig, out)

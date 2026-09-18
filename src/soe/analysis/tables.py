@@ -20,7 +20,10 @@ def _fmt(x, nd: int = 3) -> str:
             return "--"
         if math.isinf(x):
             raise ValueError("inf in a table cell; fix the upstream computation")
-        return f"{x:.{nd}f}"
+        s = f"{x:.{nd}f}"
+        # Normalise "-0.000": a negative zero in a results table reads as a real negative
+        # effect that happens to round away, which it is not.
+        return s[1:] if s.startswith("-") and float(s) == 0.0 else s
     return str(x)
 
 

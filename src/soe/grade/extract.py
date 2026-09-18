@@ -92,12 +92,11 @@ def extract(text: str, policy: str) -> str | None:
         return ints[-1].replace(",", "")
 
     if policy == "answer_is":
-        m = None
-        for m in _ANSWER_IS.finditer(text):
-            pass
-        if not m:
+        matches = _ANSWER_IS.findall(text)
+        if not matches:
             return None
-        return m.group(1).replace(",", "").strip() or None
+        # Last statement wins: models often restate the answer after a correction.
+        return matches[-1].replace(",", "").strip() or None
 
     return None
 

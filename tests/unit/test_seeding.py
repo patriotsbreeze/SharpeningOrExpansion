@@ -5,8 +5,15 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from soe.seeding import (
-    MAX_DATASET, MAX_EPOCH, MAX_MODEL, MAX_PROBLEM, MAX_SAMPLE,
-    SeedKey, seed_base, seed_for, unpack,
+    MAX_DATASET,
+    MAX_EPOCH,
+    MAX_MODEL,
+    MAX_PROBLEM,
+    MAX_SAMPLE,
+    SeedKey,
+    seed_base,
+    seed_for,
+    unpack,
 )
 
 # Golden vectors. These exist to catch an accidental change to the bit layout, which would
