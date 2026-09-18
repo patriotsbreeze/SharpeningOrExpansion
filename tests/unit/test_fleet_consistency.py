@@ -195,3 +195,52 @@ def test_verify_detects_two_machines_using_different_manifests(tmp_path):
     rep = verify_experiment(tmp_path, cfg.exp_id, deep=True)
     assert not rep.ok, "manifest drift across machines must not pass verify"
     assert any("more than one problem_uid" in e for e in rep.errors), rep.render()
+
+
+def test_two_workers_stealing_the_same_unit_do_not_crash(tmp_path, monkeypatch):
+    """Two VMs reaching the steal pass together must converge, not fail.
+
+    The steal pass is what lets a surviving VM finish work abandoned by an evicted one, so two
+    live workers racing for the same unit is the normal case, not an anomaly.
+
+    The race is specifically at WRITE time: the loser passed the is_done check before the
+    winner's marker existed, generated its samples, and only collides on the way out. That is
+    the path under test, so is_done is forced False to reproduce it -- an early return would
+    not exercise it. Because seeds are a pure function of (problem, sample), the loser's output
+    would have been the same work, so conceding is correct and the run stays complete.
+    """
+    from soe.data.loaders import load_mock_problems
+    from soe.gen import runner as runner_mod
+    from soe.gen.factory import make_backend
+    from soe.gen.planner import build_plan
+    from soe.io.markers import read_marker
+    from soe.registry import load_datasets, load_models
+
+    cfg = _cfg(2, exp_id="steal")
+    problems = load_mock_problems(load_datasets()["mock_mini"])
+    pmap = {p.problem_idx: p for p in problems}
+    unit = build_plan(cfg, {"mock_mini": len(problems)})[0]
+    spec = load_models()[unit.model_key]
+
+    def once():
+        backend = make_backend("mock", answers={p.problem_idx: p.answer for p in problems})
+        backend.load(spec)
+        try:
+            return runner_mod.run_unit(
+                unit, root=tmp_path, spec=spec, samp=cfg.sampling,
+                problems=pmap, backend=backend,
+            )
+        finally:
+            backend.close()
+
+    first = once()
+    assert first is not None and first.exists()
+    before = read_marker(first)
+
+    # Force the loser past the is_done guard so it collides at write time, as a real racing
+    # worker that started before the winner's marker landed would.
+    monkeypatch.setattr(runner_mod, "is_done", lambda _p: False)
+    second = once()
+
+    assert second is None, "the losing worker must concede, not raise"
+    assert read_marker(first) == before, "the winner's artifacts must be left untouched"

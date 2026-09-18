@@ -24,7 +24,7 @@ from soe.gen.backend import GenerationBackend, GenRequest
 from soe.gen.planner import WorkUnit
 from soe.ids import sample_uid
 from soe.io.markers import is_done, write_marker
-from soe.io.shards import write_shard
+from soe.io.shards import ShardExistsError, write_shard
 from soe.paths import gen_chunk
 from soe.prompts.render import render
 from soe.seeding import seed_for
@@ -119,7 +119,14 @@ def run_unit(
             stop_str=s.stop_str,
         )
 
-    integrity = write_shard(out_path, rows)
+    try:
+        integrity = write_shard(out_path, rows)
+    except ShardExistsError:
+        # Another worker finished this same unit while we were generating it. That is the
+        # expected outcome of two machines reaching the steal pass together, not an error:
+        # the seeds are a pure function of (problem, sample), so their shard holds exactly
+        # the samples ours would have. Concede the unit and move on.
+        return None
     seeds = [r["seed"] for r in rows]
     write_marker(
         out_path, unit_id=unit.unit_id, integrity=integrity,
