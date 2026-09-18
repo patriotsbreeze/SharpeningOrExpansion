@@ -13,3 +13,6 @@ paper/*.log
 paper/*.out
 paper/*.pdf
 .DS_Store
+.hypothesis/
+.pytest_cache/
+.ruff_cache/
