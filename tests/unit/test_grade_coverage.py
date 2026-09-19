@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from soe.config import ArmSpec, ExperimentConfig, SamplingSpec
 from soe.data.loaders import load_mock_problems, write_manifest
 from soe.gen.planner import build_plan, write_plan
@@ -159,3 +161,94 @@ def test_a_partial_NON_target_gradecfg_is_reported_not_failed(tmp_path):
     rep = verify_experiment(tmp_path, cfg.exp_id, deep=True, target_gradecfg=target)
     assert rep.ok, rep.render()
     assert rep.stats[f"gradecfg[{other}]"].startswith("1/")
+
+
+def test_grade_marker_is_durable_and_uniquely_identified(tmp_path):
+    """The marker must not be able to outlive the data it vouches for.
+
+    The parquet used to be written with a plain rename and no fsync while its marker went
+    through the fsync-ing atomic path, so a crash could leave the marker durable and the data
+    not -- after which `is_done` returns True forever and the chunk is never graded again.
+    """
+    import json
+
+    cfg = _run(tmp_path)
+    graded = sorted(exp_root(tmp_path, cfg.exp_id).joinpath("grade").rglob("*.parquet"))
+    assert graded
+
+    ids = set()
+    for g in graded:
+        m = json.loads(marker_for(g).read_text())
+        # The recorded hash must describe the bytes actually on disk.
+        import hashlib
+
+        assert m["sha256"] == hashlib.sha256(g.read_bytes()).hexdigest()
+        assert m["bytes"] == g.stat().st_size
+        assert m["git_sha"], "grader code version must be recorded; the gid covers names only"
+        ids.add(m["unit_id"])
+
+    assert len(ids) == len(graded), (
+        "grade marker unit_ids collide: the old id omitted model/dataset/variant, so every arm "
+        "shared one id per chunk and set-based accounting undercounted"
+    )
+
+
+def test_analysis_refuses_to_pool_two_grader_configurations(tmp_path):
+    """Pooling duplicates every sample; where columns differ it scores blanks as correct."""
+    from soe.analysis.pipeline import load_graded
+
+    cfg = _run(tmp_path)
+    probs = load_mock_problems(load_datasets()["mock_mini"])
+    pmap = {p.problem_idx: p for p in probs}
+    for g in sorted(exp_root(tmp_path, cfg.exp_id).joinpath("gen").rglob("*.jsonl.zst")):
+        grade_shard(
+            g, root=tmp_path, exp_id=cfg.exp_id, ref=parse_gen_chunk(g, tmp_path, cfg.exp_id),
+            problems=pmap, graders=["fastint", "qwen"],
+        )
+    assert len(list_gradecfgs(tmp_path, cfg.exp_id)) == 2
+
+    with pytest.raises(ValueError, match="grader configurations present"):
+        load_graded(tmp_path, cfg.exp_id)
+
+    # Naming one is fine, and reports which was used.
+    target = list_gradecfgs(tmp_path, cfg.exp_id)[0]
+    df, gid = load_graded(tmp_path, cfg.exp_id, grading_id=target)
+    assert gid == target
+    assert not df["sample_uid"].duplicated().any()
+
+
+def test_a_null_correctness_value_is_never_scored_as_correct():
+    """bool(float('nan')) is True, so an unvalidated column reads blanks as right answers.
+
+    The frame is built by concatenating two frames with DIFFERENT column sets, which is exactly
+    what pooling a fastint-only gradecfg with a fastint+mathverify one produces -- the narrower
+    one simply has no such column.
+    """
+    import pandas as pd
+
+    from soe.analysis.tensors import build_tensor
+
+    def _arm(model, extra):
+        rows = []
+        for p in range(2):
+            for s in range(4):
+                r = dict(model_key=model, dataset_key="d", variant="v", sampling_id="s",
+                         problem_idx=p, sample_idx=s, n_completion_tokens=10,
+                         answer_token_pos=1)
+                r["nullgold__fastint__boxed_last"] = False
+                if extra:
+                    r["correct__fastint__boxed_last"] = False
+                rows.append(r)
+        return pd.DataFrame(rows)
+
+    narrow = _arm("base", extra=False)   # graded under a configuration lacking the column
+    wide = _arm("rl", extra=True)
+    df = pd.concat([narrow, wide], ignore_index=True)
+
+    col = df["correct__fastint__boxed_last"]
+    assert col.isna().any(), "the concat must actually produce nulls for this to be a test"
+    # The behaviour being prevented: these nulls would read as True, i.e. scored CORRECT.
+    assert col.to_numpy(dtype=bool)[: len(narrow)].all()
+
+    with pytest.raises(ValueError, match="null values"):
+        build_tensor(df, grader="fastint", policy="boxed_last", model_keys=["base", "rl"])

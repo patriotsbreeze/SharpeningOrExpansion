@@ -10,19 +10,22 @@ decomposition would become unaffordable and get cut.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
 
 import pandas as pd
 
 from soe.data.canonical import Problem
+from soe.fingerprint import git_sha
 from soe.grade.extract import POLICIES, extract_all
 from soe.grade.graders import make_grader
 from soe.grade.nullgold import permuted_golds
 from soe.grade.pool import clip_tail
 from soe.grade.tokenpos import answer_token_pos, find_answer_char
+from soe.ids import unit_id
 from soe.io.markers import is_done, write_marker
-from soe.io.shards import read_shard
+from soe.io.shards import _atomic_write, read_shard
 from soe.paths import ChunkRef, grade_chunk
 
 
@@ -129,20 +132,45 @@ def grade_shard(
     if is_done(out_path):
         return None
     rows = list(read_shard(gen_path))
+    if not rows:
+        raise ValueError(
+            f"{gen_path} contains no rows; refusing to write a marker vouching for nothing"
+        )
     df = grade_rows(rows, problems, graders=graders, policies=policies)
+    if df.empty:
+        raise ValueError(f"grading {gen_path} produced no rows from {len(rows)} samples")
+
+    # Serialise to bytes first, then write through the same atomic path the generation shards
+    # use. The previous version wrote the parquet with a plain rename and NO fsync while the
+    # marker beside it went through _atomic_write, which fsyncs both the file and its directory
+    # -- so a crash could leave the MARKER durable and the parquet not. That inverts the one
+    # invariant the whole resume design rests on: is_done() would then return True forever and
+    # the chunk would never be graded again. Recorded complete, data nowhere.
+    buf = io.BytesIO()
+    df.to_parquet(buf, index=False)
+    payload = buf.getvalue()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out_path.with_name(out_path.name + ".tmp")
-    df.to_parquet(tmp, index=False)
-    tmp.replace(out_path)
+    _atomic_write(out_path, payload)
+
     integrity = {
         "n_rows": len(df),
-        "sha256": hashlib.sha256(out_path.read_bytes()).hexdigest(),
-        "bytes": out_path.stat().st_size,
+        # Hash the bytes we intended to write, not the file we just wrote. Re-reading is
+        # self-certifying: a torn parquet would get a hash that matches it perfectly.
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
     }
     write_marker(
-        out_path, unit_id=f"grade:{gid}:{ref.pshard}:{ref.chunk_idx}", integrity=integrity,
+        out_path,
+        # A real, unique id. The old f"grade:{gid}:{pshard}:{chunk}" omitted model, dataset,
+        # variant and samp, so on stage1 fourteen arms collapsed onto one id per chunk and any
+        # set-based accounting would undercount by 14x.
+        unit_id=unit_id(exp_id, ref.model_key, ref.dataset_key, ref.variant,
+                        ref.sampling_id, ref.pshard, ref.chunk_idx, 0),
+        integrity=integrity,
         problem_idxs=sorted({int(i) for i in df["problem_idx"]}),
         seed_lo=0, seed_hi=0, chunk_size=len(df),
-        engine_fingerprint=f"grade|{gid}", git_sha="", wall_s=0.0, started_at="",
+        # Grader NAMES are in the gid; grader CODE is not. Recording the commit is what makes
+        # a gradecfg half-produced at one version and half at another detectable at all.
+        engine_fingerprint=f"grade|{gid}", git_sha=git_sha(), wall_s=0.0, started_at="",
     )
     return out_path
