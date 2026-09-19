@@ -16,6 +16,12 @@ GEN_CHUNK_RE = re.compile(
     r"/samp=(?P<samp>[^/]+)/pshard=(?P<pshard>\d+)/chunk=(?P<chunk>\d+)\.jsonl\.zst$"
 )
 
+GRADE_CHUNK_RE = re.compile(
+    r"grade/gradecfg=(?P<gradecfg>[^/]+)"
+    r"/model=(?P<model>[^/]+)/dataset=(?P<dataset>[^/]+)/variant=(?P<variant>[^/]+)"
+    r"/samp=(?P<samp>[^/]+)/pshard=(?P<pshard>\d+)/chunk=(?P<chunk>\d+)\.parquet$"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ChunkRef:
@@ -66,6 +72,43 @@ def grade_chunk(
         / f"samp={ref.sampling_id}"
         / f"pshard={ref.pshard:02d}"
         / f"chunk={ref.chunk_idx:04d}.parquet"
+    )
+
+
+def gradecfg_dir(root: Path | str, exp_id: str, grading_id: str) -> Path:
+    return exp_root(root, exp_id) / "grade" / f"gradecfg={grading_id}"
+
+
+def list_gradecfgs(root: Path | str, exp_id: str) -> list[str]:
+    """Every grading configuration present in the tree, sorted.
+
+    More than one is normal -- ``grading_id`` hashes the grader and policy SET, so re-grading
+    with a different grader produces a second directory. Callers must therefore CHOOSE one
+    rather than consuming the union: concatenating them duplicates every sample, and where the
+    two configurations disagree on columns it silently scores blanks as correct.
+    """
+    base = exp_root(root, exp_id) / "grade"
+    if not base.is_dir():
+        return []
+    return sorted(
+        d.name.split("=", 1)[1] for d in base.iterdir()
+        if d.is_dir() and d.name.startswith("gradecfg=")
+    )
+
+
+def parse_grade_chunk(path: Path | str, root: Path | str, exp_id: str) -> tuple[str, ChunkRef]:
+    """Inverse of :func:`grade_chunk`. Returns ``(grading_id, ref)``."""
+    rel = str(Path(path).relative_to(exp_root(root, exp_id))).replace("\\", "/")
+    m = GRADE_CHUNK_RE.search(rel)
+    if not m:
+        raise ValueError(f"not a grade chunk path: {rel}")
+    return m["gradecfg"], ChunkRef(
+        model_key=m["model"],
+        dataset_key=m["dataset"],
+        variant=m["variant"],
+        sampling_id=m["samp"],
+        pshard=int(m["pshard"]),
+        chunk_idx=int(m["chunk"]),
     )
 
 

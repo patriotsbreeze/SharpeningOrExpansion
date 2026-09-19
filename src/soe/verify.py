@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from soe.gen.planner import WorkUnit, read_plan
-from soe.io.markers import read_marker
+from soe.io.markers import is_done, read_marker
 from soe.io.shards import read_shard, verify_shard
-from soe.paths import exp_root, gen_chunk
+from soe.paths import exp_root, gen_chunk, grade_chunk, list_gradecfgs
 
 
 @dataclass
@@ -89,7 +89,33 @@ def verify_experiment(
             f"config mixed into this directory): {sorted(orphans)[:3]}"
         )
 
-    # 2-5. per-shard integrity and seed accounting
+    # 2. grading coverage
+    #
+    # An ungraded shard is not a missing file so much as a missing ROW: `build_tensor` derives
+    # its problem axis from whatever is in the graded frame, so a VM evicted before it reached
+    # its own grading step makes those problems vanish from the analysis entirely -- with no
+    # ragged-n warning, because every surviving problem still has a full sample count. This is
+    # the realistic fleet failure, and without this check nothing anywhere reports it.
+    gradecfgs = list_gradecfgs(root, exp_id)
+    rep.stats["gradecfgs"] = ",".join(gradecfgs) if gradecfgs else "(none)"
+    if not gradecfgs:
+        rep.warn(
+            "no graded output at all; run `soe grade` before analysis. A generation-only tree "
+            "is legitimate mid-flight, which is why this is a warning rather than a failure."
+        )
+    for gid in gradecfgs:
+        ungraded = [u for u in done if not is_done(grade_chunk(root, exp_id, gid, u.chunk_ref))]
+        if ungraded:
+            u = ungraded[0]
+            rep.fail(
+                f"gradecfg={gid} covers {len(done) - len(ungraded)}/{len(done)} generated "
+                f"chunks; {len(ungraded)} are ungraded (e.g. {u.model_key}/{u.dataset_key} "
+                f"pshard={u.pshard} chunk={u.chunk_idx}). Those samples are silently ABSENT "
+                f"from the analysis -- whole problems disappear from the tensor without a "
+                f"ragged-n warning. Re-run `soe grade` over the assembled tree."
+            )
+
+    # 3-6. per-shard integrity and seed accounting
     seeds_by_arm: dict[tuple, Counter] = defaultdict(Counter)
     n_by_arm_problem: dict[tuple, Counter] = defaultdict(Counter)
     fingerprints: dict[tuple, set] = defaultdict(set)
@@ -168,6 +194,4 @@ def verify_experiment(
 
 
 def _marker(root: Path, u: WorkUnit) -> bool:
-    from soe.io.markers import is_done
-
     return is_done(gen_chunk(root, u.exp_id, u.chunk_ref))
