@@ -17,6 +17,10 @@
 # pay-as-you-go rates, while single-GPU NC-series does not.
 set -Eeuo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/azwrap.sh
+source "${HERE}/../scripts/azwrap.sh"
+
 # Prefer the H100 NC line: Azure states it is only deploying net new capacity for
 # NCads_H100_v5, so the A100 pool is frozen and will only get harder to allocate.
 VM_SIZE="${VM_SIZE:-Standard_NC40ads_H100_v5}"
@@ -38,15 +42,16 @@ BRANCH="${BRANCH:-claude/admiring-carson-k4s9to}"
 command -v az >/dev/null || { echo "az CLI not found" >&2; exit 1; }
 [[ -f "${SSH_KEY}" ]] || { echo "no ssh public key at ${SSH_KEY}" >&2; exit 1; }
 
+az_banner
 echo "[launch] ${FLEET}x ${VM_SIZE} (${PRIORITY}) in ${LOCATION}, rg=${RG}"
 
 # A dedicated resource group is the teardown story: `az vm delete` does not cascade, and
 # orphaned public IPs and disks keep billing after the run "ended".
-az group create -n "${RG}" -l "${LOCATION}" -o none
+azrun group create -n "${RG}" -l "${LOCATION}" -o none
 echo "[launch] resource group ${RG} ready (delete it to tear everything down)"
 
-SUB=$(az account show --query id -o tsv)
-SCOPE="/subscriptions/${SUB}/resourceGroups/$(az storage account show \
+SUB=$(azq account show --query id -o tsv)
+SCOPE="/subscriptions/${SUB}/resourceGroups/$(azq storage account show \
   --name "${STORAGE_ACCOUNT}" --query resourceGroup -o tsv)/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT}"
 
 # Leadership goes to the first VM that actually gets created, not to index 0.
@@ -61,6 +66,8 @@ created=() failed=() LEAD_IDX=""
 for ((w = 0; w < FLEET; w++)); do
   NAME="soe-w${w}"
   USERDATA=$(mktemp)
+  # shellcheck disable=SC2064
+  trap "rm -f '${USERDATA}'" RETURN EXIT
   {
     echo '#!/usr/bin/env bash'
     echo "export AZ_CONTAINER_URL='${AZ_CONTAINER_URL}'"
@@ -89,7 +96,7 @@ for ((w = 0; w < FLEET; w++)); do
   #   twice and matches the pricing table. The CLI page has a dropped negation.)
   # --ephemeral-os-disk requires Delete eviction, which we already use. Temp-disk placement
   #   keeps the local NVMe free for the HF cache.
-  if az vm create \
+  if azrun vm create \
       --resource-group "${RG}" --name "${NAME}" --location "${LOCATION}" \
       --size "${VM_SIZE}" --image "${IMAGE}" \
       --admin-username "${ADMIN}" --ssh-key-values "${SSH_KEY}" \
@@ -103,12 +110,14 @@ for ((w = 0; w < FLEET; w++)); do
       -o none 2>/tmp/soe_create_${w}.err; then
     created+=("${NAME}")
     [[ -n "${LEAD_IDX}" ]] || LEAD_IDX="${w}"
-    PRINCIPAL=$(az vm show -g "${RG}" -n "${NAME}" --query identity.principalId -o tsv)
+    PRINCIPAL=$(azq vm show -g "${RG}" -n "${NAME}" --query identity.principalId -o tsv 2>/dev/null || echo "")
     # Least privilege: the VM needs to read and write blobs and nothing else.
-    az role assignment create --assignee-object-id "${PRINCIPAL}" \
-      --assignee-principal-type ServicePrincipal \
-      --role "Storage Blob Data Contributor" --scope "${SCOPE}" -o none \
-      || echo "[launch] WARN: could not grant blob access to ${NAME}; azcopy will fail"
+    if [[ -n "${PRINCIPAL}" ]] || az_dry; then
+      azrun role assignment create --assignee-object-id "${PRINCIPAL}" \
+        --assignee-principal-type ServicePrincipal \
+        --role "Storage Blob Data Contributor" --scope "${SCOPE}" -o none \
+        || echo "[launch] WARN: could not grant blob access to ${NAME}; azcopy will fail"
+    fi
   else
     failed+=("${NAME}")
     echo "[launch] FAILED ${NAME}: $(tail -2 /tmp/soe_create_${w}.err | tr '\n' ' ')"

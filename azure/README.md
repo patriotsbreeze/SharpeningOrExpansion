@@ -109,10 +109,23 @@ delete your results.
 
 ## 6. Launch the fleet
 
+Preflight the account first — this checks all three gates above in one command and names the
+step that fixes each failure:
+
+```bash
+soe doctor --azure --location eastus2 --vm-size Standard_NC40ads_H100_v5
+```
+
+Then rehearse the launch. `DRY_RUN=1` prints every `az` command fully expanded and creates
+nothing, which is how a malformed flag becomes a laptop-time failure rather than one you find
+while GPUs are billing:
+
 ```bash
 export LOCATION=eastus2 STORAGE_ACCOUNT=<acct> FLEET=4
 export CONFIG=configs/experiments/stage1_tierA.yaml
-./azure/launch.sh
+
+DRY_RUN=1 ./azure/launch.sh      # rehearse
+./azure/launch.sh                # for real
 ```
 
 One single-GPU VM per worker, each with a system-assigned identity scoped to
@@ -256,6 +269,10 @@ Each is silent — no error, just data loss or money burned.
 - Whether a CUDA 12.x vLLM wheel runs on the image's driver. Step 7 smoke-tests this.
 - `az compute-recommender spot-placement-recommender` does **not** exist as a CLI extension —
   if you see it suggested elsewhere it will fail. Use the `resource-graph` queries instead.
+
+`DRY_RUN=1` and `soe doctor --azure` reduce this list but do not empty it: a dry run proves the
+command is *well-formed*, not that Azure accepts it. The ~$2 pilot in step 7 is still the first
+moment any of this touches a real subscription.
 - Regional capacity: SKU availability is subscription-scoped, so **any published region list is
   wrong for you by construction.** Only `az vm list-skus -l <L> --all` with empty
   `Restrictions` is authoritative. The regions named here are candidates to test.

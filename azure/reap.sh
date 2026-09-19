@@ -16,6 +16,12 @@
 # already in blob storage, so keeping it alive is pure cost.
 set -Eeuo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/azwrap.sh
+source "${HERE}/../scripts/azwrap.sh"
+# shellcheck source=scripts/objstore.sh
+source "${HERE}/../scripts/objstore.sh"
+
 RG="${RG:-soe-run}"
 AZ_CONTAINER_URL="${AZ_CONTAINER_URL:?set AZ_CONTAINER_URL}"
 DEADLINE_MIN="${DEADLINE_MIN:-25}"     # generous: bootstrap installs torch and vllm
@@ -26,21 +32,18 @@ command -v azcopy >/dev/null || { echo "azcopy not found" >&2; exit 1; }
 now=$(date -u +%s)
 work=$(mktemp -d); trap 'rm -rf "${work}"' EXIT
 
-_url() {
-  local sub="$1" base="${AZ_CONTAINER_URL}"
-  if [[ "${base}" == *"?"* ]]; then echo "${base%%\?*}/${sub}?${base#*\?}";
-  else echo "${base%/}/${sub}"; fi
-}
+# _az_url comes from objstore.sh. The private copy this file used to carry duplicated the
+# SAS-splicing logic that the objstore tests cover, so a fix in one never reached the other.
 
-azcopy copy "$(_url "heartbeat")/*" "${work}" --recursive --overwrite=true \
+azcopy copy "$(_az_url "heartbeat" "/*")" "${work}" --recursive --overwrite=true \
   --output-level=quiet 2>/dev/null || true
 
-mapfile -t VMS < <(az vm list -g "${RG}" --query "[].name" -o tsv 2>/dev/null || true)
+mapfile -t VMS < <(azq vm list -g "${RG}" --query "[].name" -o tsv 2>/dev/null || true)
 ((${#VMS[@]})) || { echo "no VMs in ${RG}"; exit 0; }
 
 reap=()
 for vm in "${VMS[@]}"; do
-  created=$(az vm show -g "${RG}" -n "${vm}" --query "timeCreated" -o tsv 2>/dev/null || echo "")
+  created=$(azq vm show -g "${RG}" -n "${vm}" --query "timeCreated" -o tsv 2>/dev/null || echo "")
   age_min=9999
   if [[ -n "${created}" ]]; then
     age_min=$(( (now - $(date -u -d "${created}" +%s)) / 60 ))
@@ -81,5 +84,5 @@ if [[ "${DRY_RUN}" != "0" ]]; then
 fi
 for vm in "${reap[@]}"; do
   echo "deleting ${vm}"
-  az vm delete -g "${RG}" -n "${vm}" --yes --no-wait
+  azrun vm delete -g "${RG}" -n "${vm}" --yes --no-wait
 done

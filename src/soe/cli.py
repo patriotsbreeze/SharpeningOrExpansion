@@ -8,6 +8,7 @@ GPU packages installed. ``tests/unit/test_import_hygiene.py`` enforces it.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import typer
@@ -56,7 +57,12 @@ def registry_check():
 
 
 @app.command()
-def doctor(registry: bool = typer.Option(False, "--registry", help="Resolve every HF id.")):
+def doctor(
+    registry: bool = typer.Option(False, "--registry", help="Resolve every HF id."),
+    azure: bool = typer.Option(False, "--azure", help="Check the Azure account can run this."),
+    location: str = typer.Option("eastus2", help="Region to check quota and offering in."),
+    vm_size: str = typer.Option("Standard_NC40ads_H100_v5", help="SKU to check."),
+):
     """Preflight. Run this BEFORE booking GPU time -- a typo found here costs nothing.
 
     Every id in the registries came from a project README rather than the Hub itself, so this
@@ -67,6 +73,9 @@ def doctor(registry: bool = typer.Option(False, "--registry", help="Resolve ever
     check_freeze(strict=True)
     models, datasets = load_models(), load_datasets()
     typer.echo(f"registries: {len(models)} models, {len(datasets)} datasets, freeze OK")
+
+    if azure:
+        _doctor_azure(location, vm_size)
 
     if not registry:
         return
@@ -96,6 +105,110 @@ def doctor(registry: bool = typer.Option(False, "--registry", help="Resolve ever
         typer.echo("\n".join(["", "UNRESOLVED:", *bad]))
         raise typer.Exit(1)
     typer.echo("all ids resolve")
+
+
+def _doctor_azure(location: str, vm_size: str) -> None:
+    """Preflight the Azure account. Every failure names the runbook step that fixes it.
+
+    Three gates fail differently and are easy to confuse: subscription ELIGIBILITY (Free Trial
+    cannot raise GPU quota and is excluded from Spot), QUOTA (on-demand and spot are separate
+    pools requiring separate requests), and subscription OFFERING (a SKU can be quota-approved,
+    have capacity, and still not be offered to you). This checks all three before any GPU bills.
+    """
+    import json as _json
+    import shutil as _shutil
+    import subprocess as _sp
+
+    bad: list[str] = []
+
+    def _az(*args: str) -> tuple[int, str]:
+        r = _sp.run(["az", *args], capture_output=True, text=True, timeout=120)
+        return r.returncode, (r.stdout or r.stderr).strip()
+
+    if not _shutil.which("az"):
+        typer.echo("  FAIL az CLI not on PATH -- see azure/README.md step 0")
+        raise typer.Exit(1)
+
+    rc, out = _az("account", "show", "-o", "json")
+    if rc != 0:
+        typer.echo("  FAIL not logged in: run `az login`  [README step 0]")
+        raise typer.Exit(1)
+    acct = _json.loads(out)
+    quota_id = (acct.get("subscriptionPolicies") or {}).get("quotaId", "")
+    typer.echo(f"  OK   subscription {acct.get('name')} ({acct.get('state')})")
+    if "FreeTrial" in quota_id:
+        bad.append(
+            f"subscription is Free Trial (quotaId={quota_id}): cannot raise GPU quota and is "
+            f"excluded from Spot entirely  [README step 0]"
+        )
+        typer.echo("  FAIL Free Trial subscription")
+
+    rc, out = _az("vm", "list-skus", "-l", location, "--size", vm_size, "--all", "-o", "json")
+    if rc != 0:
+        bad.append(f"could not list SKUs in {location}: {out[:160]}")
+        typer.echo(f"  FAIL vm list-skus {vm_size}")
+    else:
+        skus = _json.loads(out or "[]")
+        if not skus:
+            bad.append(f"{vm_size} is not offered in {location} at all  [README step 2]")
+            typer.echo(f"  FAIL {vm_size} not offered in {location}")
+        else:
+            restr = skus[0].get("restrictions") or []
+            if restr:
+                reasons = ",".join(r.get("reasonCode", "?") for r in restr)
+                bad.append(
+                    f"{vm_size} in {location} is restricted ({reasons}). NotAvailableForSubscription "
+                    f"is a THIRD failure mode, distinct from quota and capacity  [README step 2]"
+                )
+                typer.echo(f"  FAIL {vm_size} restricted: {reasons}")
+            else:
+                typer.echo(f"  OK   {vm_size} offered in {location}, no restrictions")
+            fam = skus[0].get("family", "")
+            if fam:
+                typer.echo(f"  OK   ARM quota family: {fam}  (never hardcode this)")
+
+    rc, out = _az("vm", "list-usage", "-l", location, "-o", "json")
+    if rc != 0:
+        bad.append(f"could not read quota in {location}: {out[:160]}")
+        typer.echo("  FAIL vm list-usage")
+    else:
+        usage = _json.loads(out or "[]")
+        def _limit(pred) -> int | None:
+            for u in usage:
+                name = (u.get("name") or {}).get("value", "")
+                if pred(name.lower()):
+                    return int(u.get("limit", 0))
+            return None
+
+        dedicated = _limit(lambda n: "h100" in n and "low" not in n and "spot" not in n)
+        spot = _limit(lambda n: "lowpriority" in n or "spot" in n)
+        for label, val, step in (("on-demand", dedicated, "3"), ("spot", spot, "3")):
+            if val is None:
+                typer.echo(f"  WARN could not identify the {label} quota row; read the table by hand")
+            elif val <= 0:
+                bad.append(f"{label} quota is {val} in {location} -- request it  [README step {step}]")
+                typer.echo(f"  FAIL {label} quota = {val}")
+            else:
+                typer.echo(f"  OK   {label} quota = {val} vCPU")
+
+    container = os.environ.get("AZ_CONTAINER_URL", "")
+    if not container:
+        typer.echo("  WARN AZ_CONTAINER_URL unset; skipping the blob check  [README step 5]")
+    elif not _shutil.which("azcopy"):
+        typer.echo("  WARN azcopy not on PATH; skipping the blob check")
+    else:
+        r = _sp.run(["azcopy", "list", container, "--output-level=essential"],
+                    capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            bad.append(f"blob container unreachable: {(r.stderr or r.stdout)[:160]}  [README step 5]")
+            typer.echo("  FAIL blob container unreachable")
+        else:
+            typer.echo("  OK   blob container reachable")
+
+    if bad:
+        typer.echo("\n".join(["", "BLOCKERS:", *(f"  - {b}" for b in bad)]))
+        raise typer.Exit(1)
+    typer.echo("azure preflight OK")
 
 
 @app.command()
