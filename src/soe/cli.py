@@ -186,15 +186,26 @@ def grade(
         key: {p.problem_idx: p for p in read_manifest(problems_manifest(root, cfg.exp_id, key))}
         for key in sorted({a.dataset_key for a in cfg.arms})
     }
-    n = 0
+    from soe.io.markers import is_done
+
+    n = skipped = 0
     for path in sorted(exp_root(root, cfg.exp_id).joinpath("gen").rglob("*.jsonl.zst")):
+        # A shard without its marker is uncertified: generation crashed between writing the
+        # data and writing the marker. Grading it would feed unverified rows into the tensor
+        # while `verify` still counts the unit as not-done.
+        if not is_done(path):
+            skipped += 1
+            continue
         ref = parse_gen_chunk(path, root, cfg.exp_id)
         if grade_shard(
             path, root=root, exp_id=cfg.exp_id, ref=ref,
             problems=problems[ref.dataset_key], graders=names,
         ):
             n += 1
-    typer.echo(f"graded {n} shards with {names}")
+    msg = f"graded {n} shards with {names}"
+    if skipped:
+        msg += f" ({skipped} uncertified shards skipped -- no completion marker)"
+    typer.echo(msg)
 
 
 @app.command()

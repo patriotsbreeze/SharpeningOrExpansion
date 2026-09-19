@@ -223,7 +223,18 @@ def verify_experiment(
                     f"problems with unequal n weights them by differing estimator variance "
                     f"and is not comparable across arms."
                 )
-            expected = next((u.n_total for u in done if u.model_key == arm[0]), None)
+            # Match the FULL arm, not just the model. A model can carry different n_total in
+            # different arms -- stage1 samples n=512 on the Tier A base arms and n=256 on the
+            # controls -- so matching on model_key alone picked whichever arm sorted first and
+            # warned on every correct 512-sample arm. Training the operator to ignore verify
+            # warnings is a bad trade right before adding a real one.
+            expected = next(
+                (
+                    u.n_total for u in done
+                    if (u.model_key, u.dataset_key, u.variant, u.sampling_id) == arm
+                ),
+                None,
+            )
             if expected and vals and next(iter(vals)) != expected:
                 rep.warn(f"{arm}: n={next(iter(vals))} but plan says n_total={expected}")
 
