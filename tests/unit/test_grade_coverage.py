@@ -66,43 +66,85 @@ def test_grade_path_round_trips():
 
 def test_a_fully_graded_run_passes(tmp_path):
     cfg = _run(tmp_path)
-    rep = verify_experiment(tmp_path, cfg.exp_id, deep=True)
+    gid = list_gradecfgs(tmp_path, cfg.exp_id)[0]
+    rep = verify_experiment(tmp_path, cfg.exp_id, deep=True, target_gradecfg=gid)
     assert rep.ok, rep.render()
-    assert rep.stats["gradecfgs"] != "(none)"
+    assert "(target)" in rep.stats[f"gradecfg[{gid}]"]
 
 
 def test_an_ungraded_chunk_fails_verify(tmp_path):
     """The regression test for the whole defect: this passed before the coverage check."""
     cfg = _run(tmp_path)
+    gid = list_gradecfgs(tmp_path, cfg.exp_id)[0]
     graded = sorted(exp_root(tmp_path, cfg.exp_id).joinpath("grade").rglob("*.parquet"))
     assert graded
     marker_for(graded[0]).unlink()
     graded[0].unlink()
 
-    rep = verify_experiment(tmp_path, cfg.exp_id, deep=True)
+    rep = verify_experiment(tmp_path, cfg.exp_id, deep=True, target_gradecfg=gid)
     assert not rep.ok, "an ungraded chunk must not pass the gate"
     assert any("ungraded" in e for e in rep.errors), rep.render()
 
 
-def test_no_grading_at_all_is_a_warning_not_a_failure(tmp_path):
-    """A generation-only tree is legitimate mid-flight -- workers verify before grading."""
+def test_a_marker_without_its_parquet_is_not_coverage(tmp_path):
+    """The parquet is renamed without an fsync while its marker is fsynced.
+
+    So a marker can outlive the data it vouches for, and coverage keyed on markers alone is
+    precisely the check that misses it.
+    """
     cfg = _run(tmp_path)
+    gid = list_gradecfgs(tmp_path, cfg.exp_id)[0]
+    graded = sorted(exp_root(tmp_path, cfg.exp_id).joinpath("grade").rglob("*.parquet"))
+    graded[0].unlink()  # marker survives, data does not
+
+    rep = verify_experiment(tmp_path, cfg.exp_id, deep=True, target_gradecfg=gid)
+    assert not rep.ok, "a marker without its parquet must not count as covered"
+
+
+def test_incomplete_generation_downgrades_coverage_to_a_warning(tmp_path):
+    """Per-VM verify runs with require_complete off, and every VM's gradecfg is partial.
+
+    `soe grade` walks the shards on that VM's local disk while resume pulls markers but never
+    shards, so a partial gradecfg is the healthy intermediate state. Failing on it would fire
+    on every worker in the fleet.
+    """
+    cfg = _run(tmp_path)
+    gid = list_gradecfgs(tmp_path, cfg.exp_id)[0]
+    graded = sorted(exp_root(tmp_path, cfg.exp_id).joinpath("grade").rglob("*.parquet"))
+    marker_for(graded[0]).unlink()
+    graded[0].unlink()
+
+    rep = verify_experiment(
+        tmp_path, cfg.exp_id, deep=True, require_complete=False, target_gradecfg=gid
+    )
+    assert rep.ok, rep.render()
+    assert any("ungraded" in w for w in rep.warnings)
+
+
+def test_no_grading_at_all_fails_a_complete_run_but_warns_mid_flight(tmp_path):
+    """An ungraded tree cannot be analysed, so passing it would be the same silent lie."""
     import shutil
 
-    shutil.rmtree(exp_root(tmp_path, cfg.exp_id) / "grade")
-    rep = verify_experiment(tmp_path, cfg.exp_id, deep=True)
-    assert rep.ok, rep.render()
-    assert any("no graded output" in w for w in rep.warnings)
-    assert rep.stats["gradecfgs"] == "(none)"
-
-
-def test_every_gradecfg_must_be_complete(tmp_path):
-    """A second, partial grader configuration is still a hole in the analysis."""
     cfg = _run(tmp_path)
-    first = list_gradecfgs(tmp_path, cfg.exp_id)
-    assert len(first) == 1
+    shutil.rmtree(exp_root(tmp_path, cfg.exp_id) / "grade")
 
-    # Re-grade with a wider grader set, but only one chunk of it.
+    strict = verify_experiment(tmp_path, cfg.exp_id, deep=True)
+    assert not strict.ok
+    assert any("no graded output" in e for e in strict.errors)
+
+    midflight = verify_experiment(tmp_path, cfg.exp_id, deep=True, require_complete=False)
+    assert midflight.ok, midflight.render()
+    assert midflight.stats["gradecfgs"] == "(none)"
+
+
+def test_a_partial_NON_target_gradecfg_is_reported_not_failed(tmp_path):
+    """A cheap pass over everything plus an expensive pass over one arm is a legitimate shape.
+
+    Only the target configuration must be complete; the rest are data, not errors.
+    """
+    cfg = _run(tmp_path)
+    target = list_gradecfgs(tmp_path, cfg.exp_id)[0]
+
     probs = load_mock_problems(load_datasets()["mock_mini"])
     pmap = {p.problem_idx: p for p in probs}
     one = sorted(exp_root(tmp_path, cfg.exp_id).joinpath("gen").rglob("*.jsonl.zst"))[0]
@@ -110,8 +152,10 @@ def test_every_gradecfg_must_be_complete(tmp_path):
         one, root=tmp_path, exp_id=cfg.exp_id, ref=parse_gen_chunk(one, tmp_path, cfg.exp_id),
         problems=pmap, graders=["fastint", "qwen"],
     )
-    assert len(list_gradecfgs(tmp_path, cfg.exp_id)) == 2
+    cfgs = list_gradecfgs(tmp_path, cfg.exp_id)
+    assert len(cfgs) == 2
+    other = next(c for c in cfgs if c != target)
 
-    rep = verify_experiment(tmp_path, cfg.exp_id, deep=True)
-    assert not rep.ok
-    assert any("covers 1/" in e for e in rep.errors), rep.render()
+    rep = verify_experiment(tmp_path, cfg.exp_id, deep=True, target_gradecfg=target)
+    assert rep.ok, rep.render()
+    assert rep.stats[f"gradecfg[{other}]"].startswith("1/")

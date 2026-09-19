@@ -79,7 +79,7 @@ def test_recovers_analytic_passk(tmp_path):
     rep = verify_experiment(tmp_path, cfg.exp_id, deep=True)
     assert rep.ok, rep.render()
 
-    df = load_graded(tmp_path, cfg.exp_id)
+    df, _gid = load_graded(tmp_path, cfg.exp_id)
     t = build_tensor(df, grader="fastint", policy="boxed_last",
                      model_keys=["mock_base", "mock_rl"])
     n = t.n_samples
@@ -87,7 +87,9 @@ def test_recovers_analytic_passk(tmp_path):
     for model_key in ("mock_base", "mock_rl"):
         backend = make_backend("mock", **CLEAN)
         backend.load(load_models()[model_key])
-        truth_p = np.array([backend.true_p(i) for i in t.problem_idxs])
+        # problem_idxs are (dataset_key, problem_idx) pairs now: problem_idx alone is a
+        # position within one dataset's manifest and is not globally unique.
+        truth_p = np.array([backend.true_p(i) for _ds, i in t.problem_idxs])
         counts = t.correct[t.model(model_key)].sum(axis=1)
 
         for k in (1, 8, 64):

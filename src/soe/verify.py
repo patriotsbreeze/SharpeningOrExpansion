@@ -45,7 +45,12 @@ class VerifyReport:
 
 
 def verify_experiment(
-    root: Path | str, exp_id: str, *, deep: bool = True, require_complete: bool = True
+    root: Path | str,
+    exp_id: str,
+    *,
+    deep: bool = True,
+    require_complete: bool = True,
+    target_gradecfg: str | None = None,
 ) -> VerifyReport:
     rep = VerifyReport()
     root = Path(root)
@@ -94,26 +99,65 @@ def verify_experiment(
     # An ungraded shard is not a missing file so much as a missing ROW: `build_tensor` derives
     # its problem axis from whatever is in the graded frame, so a VM evicted before it reached
     # its own grading step makes those problems vanish from the analysis entirely -- with no
-    # ragged-n warning, because every surviving problem still has a full sample count. This is
-    # the realistic fleet failure, and without this check nothing anywhere reports it.
+    # ragged-n warning, because every surviving problem still has a full sample count.
+    #
+    # Only ONE configuration is required complete: the target. Every VM in the fleet produces a
+    # PARTIAL gradecfg as its normal output, because `soe grade` walks the shards on that VM's
+    # local disk and resume pulls markers but never shards. The union is completed by the
+    # analysis-machine re-grade. So "any partial gradecfg fails" would fire on the healthy case;
+    # the others are reported as data instead.
     gradecfgs = list_gradecfgs(root, exp_id)
     rep.stats["gradecfgs"] = ",".join(gradecfgs) if gradecfgs else "(none)"
-    if not gradecfgs:
-        rep.warn(
-            "no graded output at all; run `soe grade` before analysis. A generation-only tree "
-            "is legitimate mid-flight, which is why this is a warning rather than a failure."
-        )
+
+    def _covered(gid: str) -> list:
+        # Key on the PATH, never on the marker's unit_id: grade markers synthesise an id that
+        # omits model/dataset/variant, so every arm collapses onto one id per (pshard, chunk).
+        # Require the parquet itself, not just its marker -- the parquet is renamed without an
+        # fsync while the marker is fsynced, so a marker can outlive the data it vouches for.
+        out = []
+        for u in done:
+            path = grade_chunk(root, exp_id, gid, u.chunk_ref)
+            if not (is_done(path) and path.exists()):
+                out.append(u)
+        return out
+
     for gid in gradecfgs:
-        ungraded = [u for u in done if not is_done(grade_chunk(root, exp_id, gid, u.chunk_ref))]
+        if gid == target_gradecfg:
+            continue
+        n_missing = len(_covered(gid))
+        rep.stats[f"gradecfg[{gid}]"] = f"{len(done) - n_missing}/{len(done)} chunks"
+
+    if target_gradecfg is None:
+        if gradecfgs:
+            rep.warn(
+                f"no target grading configuration named, so coverage is reported but not "
+                f"enforced. Pass --graders to require one of {gradecfgs} to be complete."
+            )
+        elif require_complete:
+            rep.fail(
+                "no graded output at all. Analysis cannot run on an ungraded tree, so passing "
+                "here would be the same silent lie this gate exists to remove. Run `soe grade`."
+            )
+        else:
+            rep.warn("no graded output yet (generation-only tree)")
+    else:
+        ungraded = _covered(target_gradecfg)
+        rep.stats[f"gradecfg[{target_gradecfg}]"] = (
+            f"{len(done) - len(ungraded)}/{len(done)} chunks (target)"
+        )
         if ungraded:
             u = ungraded[0]
-            rep.fail(
-                f"gradecfg={gid} covers {len(done) - len(ungraded)}/{len(done)} generated "
-                f"chunks; {len(ungraded)} are ungraded (e.g. {u.model_key}/{u.dataset_key} "
+            msg = (
+                f"target gradecfg={target_gradecfg} covers "
+                f"{len(done) - len(ungraded)}/{len(done)} generated chunks; "
+                f"{len(ungraded)} are ungraded (e.g. {u.model_key}/{u.dataset_key} "
                 f"pshard={u.pshard} chunk={u.chunk_idx}). Those samples are silently ABSENT "
                 f"from the analysis -- whole problems disappear from the tensor without a "
                 f"ragged-n warning. Re-run `soe grade` over the assembled tree."
             )
+            # Demanding complete grading of an incomplete generation is incoherent, and the
+            # per-VM verify deliberately runs with require_complete off.
+            rep.fail(msg) if require_complete else rep.warn(msg)
 
     # 3-6. per-shard integrity and seed accounting
     seeds_by_arm: dict[tuple, Counter] = defaultdict(Counter)

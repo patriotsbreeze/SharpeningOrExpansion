@@ -25,8 +25,9 @@ class HardZero2x2:
     lost: int            # base solves, RL never does
     neither: int
     n_samples: int
-    expansion_problem_idxs: tuple[int, ...]
-    lost_problem_idxs: tuple[int, ...]
+    # (dataset_key, problem_idx) pairs -- see CorrectnessTensor.problem_idxs.
+    expansion_problem_idxs: tuple[tuple[str, int], ...]
+    lost_problem_idxs: tuple[tuple[str, int], ...]
 
     @property
     def n_problems(self) -> int:
@@ -56,15 +57,15 @@ def hard_zero_2x2(correct_base: np.ndarray, correct_rl: np.ndarray, problem_idxs
         raise ValueError(f"shape mismatch: {correct_base.shape} vs {correct_rl.shape}")
     b = correct_base.any(axis=1)
     r = correct_rl.any(axis=1)
-    idxs = np.asarray(problem_idxs)
+    idxs = list(problem_idxs)
     return HardZero2x2(
         both=int((b & r).sum()),
         expansion=int((~b & r).sum()),
         lost=int((b & ~r).sum()),
         neither=int((~b & ~r).sum()),
         n_samples=correct_base.shape[1],
-        expansion_problem_idxs=tuple(int(i) for i in idxs[~b & r]),
-        lost_problem_idxs=tuple(int(i) for i in idxs[b & ~r]),
+        expansion_problem_idxs=tuple(k for k, keep in zip(idxs, ~b & r, strict=True) if keep),
+        lost_problem_idxs=tuple(k for k, keep in zip(idxs, b & ~r, strict=True) if keep),
     )
 
 

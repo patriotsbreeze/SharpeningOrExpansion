@@ -58,6 +58,9 @@ def grade_rows(
             "model_key": r["model_key"],
             "dataset_key": r["dataset_key"],
             "variant": r["variant"],
+            # Carried so the analysis can scope an arm exactly. Without it, two arms differing
+            # only in sampling parameters are indistinguishable downstream and get averaged.
+            "sampling_id": r["sampling_id"],
             "problem_idx": r["problem_idx"],
             "sample_idx": r["sample_idx"],
             "n_completion_tokens": r["n_completion_tokens"],

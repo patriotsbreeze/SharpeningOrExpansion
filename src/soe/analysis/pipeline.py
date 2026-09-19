@@ -21,11 +21,59 @@ from soe.analysis.support import hard_zero_2x2, solve_rate_cdf
 from soe.analysis.tensors import build_tensor
 
 
-def load_graded(root: Path | str, exp_id: str) -> pd.DataFrame:
-    parts = sorted((Path(root) / f"exp={exp_id}" / "grade").rglob("*.parquet"))
+def load_graded(
+    root: Path | str, exp_id: str, *, grading_id: str | None = None
+) -> tuple[pd.DataFrame, str]:
+    """Load exactly ONE grader configuration. Returns ``(frame, grading_id)``.
+
+    Pooling `gradecfg=` directories is never right. ``grading_id`` hashes the grader and policy
+    SET, so re-grading with a different grader -- which this project's own robustness plan calls
+    for -- produces a second complete tree. Concatenating them duplicates every sample, and
+    where the two disagree on columns the narrower one contributes NaN, which
+    ``to_numpy(dtype=bool)`` reads as True. That does not lose data, it invents it.
+    """
+    from soe.paths import exp_root, list_gradecfgs
+
+    available = list_gradecfgs(root, exp_id)
+    if not available:
+        raise FileNotFoundError(f"no graded output under exp={exp_id}; run `soe grade` first")
+    if grading_id is None:
+        if len(available) > 1:
+            raise ValueError(
+                f"{len(available)} grader configurations present: {available}. Pooling them "
+                f"would duplicate every sample and score missing columns as correct. Name one "
+                f"with --gradecfg, or with --graders to derive it."
+            )
+        grading_id = available[0]
+    elif grading_id not in available:
+        raise ValueError(f"gradecfg={grading_id} not present; have {available}")
+
+    base = exp_root(root, exp_id) / "grade" / f"gradecfg={grading_id}"
+    # Select by MARKER, not by glob: a parquet renamed into place but never marked is
+    # incomplete, and a glob cannot tell the difference.
+    # marker "chunk=0000.done.json" -> data "chunk=0000.parquet". Path.with_suffix replaces
+    # only the LAST suffix, which would give "chunk=0000.done.parquet".
+    parts = sorted(
+        m.with_name(m.name[: -len(".done.json")] + ".parquet") for m in base.rglob("*.done.json")
+    )
+    parts = [p for p in parts if p.exists()]
     if not parts:
-        raise FileNotFoundError(f"no graded parquet under exp={exp_id}; run `soe grade` first")
-    return pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
+        raise FileNotFoundError(f"gradecfg={grading_id} has no completed shards")
+
+    df = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
+
+    # sample_uid is globally unique per logical sample, so this is an exact duplicate detector
+    # that depends on knowing nothing about grader configurations -- it also catches a stray
+    # second copy of the tree and a half-rebuilt gradecfg.
+    if "sample_uid" in df.columns:
+        dupes = df["sample_uid"].duplicated()
+        if dupes.any():
+            raise ValueError(
+                f"{int(dupes.sum())} duplicate sample_uids in gradecfg={grading_id} "
+                f"(e.g. {df.loc[dupes, 'sample_uid'].iloc[0]}). Samples are not i.i.d. and "
+                f"pass@k would be biased. Check for a duplicated artifact tree."
+            )
+    return df, grading_id
 
 
 def run_analysis(
@@ -37,6 +85,7 @@ def run_analysis(
     grader: str = "fastint",
     policy: str = "boxed_last",
     n_boot: int = 2000,
+    grading_id: str | None = None,
     contamination_cutoff: date = date(2025, 12, 1),
     require_verify: bool = True,
 ) -> dict:
@@ -50,7 +99,7 @@ def run_analysis(
                 + rep.render()
             )
 
-    df = load_graded(root, cfg.exp_id)
+    df, resolved_gradecfg = load_graded(root, cfg.exp_id, grading_id=grading_id)
     t = build_tensor(df, grader=grader, policy=policy, model_keys=[base_key, rl_key])
     bi, ri = t.model(base_key), t.model(rl_key)
     n = t.n_samples
@@ -85,7 +134,7 @@ def run_analysis(
     k_top = max(boot["ks"])
     summary = {
         "exp_id": cfg.exp_id, "base": base_key, "rl": rl_key,
-        "grader": grader, "policy": policy,
+        "grader": grader, "policy": policy, "gradecfg": resolved_gradecfg,
         "n_problems": t.n_problems, "n_samples": n,
         "ragged_n": t.truncated_from,
         "pass_at_1": {"base": boot["curve_a"][1], "rl": boot["curve_b"][1]},

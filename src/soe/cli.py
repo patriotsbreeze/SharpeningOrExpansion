@@ -20,6 +20,18 @@ app.add_typer(registry_app, name="registry")
 DEFAULT_ROOT = Path("runs")
 
 
+def _resolve_gradecfg(gradecfg: str, graders: str) -> str | None:
+    """A gradecfg hash, or one derived from a grader set, or None to auto-select."""
+    if gradecfg:
+        return gradecfg
+    if graders:
+        from soe.grade.extract import POLICIES
+        from soe.grade.runner import grading_id
+
+        return grading_id([g.strip() for g in graders.split(",") if g.strip()], list(POLICIES))
+    return None
+
+
 def _load_cfg(path: Path):
     from soe.config import ExperimentConfig
 
@@ -186,13 +198,29 @@ def grade(
 
 
 @app.command()
-def verify(config: Path, root: Path = DEFAULT_ROOT, deep: bool = True,
-           require_complete: bool = True):
+def verify(
+    config: Path,
+    root: Path = DEFAULT_ROOT,
+    deep: bool = True,
+    require_complete: bool = True,
+    graders: str = typer.Option(
+        "", help="Grader set whose grading must be COMPLETE, e.g. 'fastint,mathverify'."
+    ),
+    gradecfg: str = typer.Option("", help="Target gradecfg hash directly, instead of --graders."),
+):
     """Integrity gate. Analysis refuses to run until this passes."""
+    from soe.grade.extract import POLICIES
+    from soe.grade.runner import grading_id
     from soe.verify import verify_experiment
 
     cfg = _load_cfg(config)
-    rep = verify_experiment(root, cfg.exp_id, deep=deep, require_complete=require_complete)
+    target = gradecfg or None
+    if not target and graders:
+        names = [g.strip() for g in graders.split(",") if g.strip()]
+        target = grading_id(names, list(POLICIES))
+    rep = verify_experiment(
+        root, cfg.exp_id, deep=deep, require_complete=require_complete, target_gradecfg=target
+    )
     typer.echo(rep.render())
     if not rep.ok:
         raise typer.Exit(1)
@@ -207,13 +235,18 @@ def analyze(
     grader: str = "fastint",
     policy: str = "boxed_last",
     n_boot: int = 2000,
+    gradecfg: str = typer.Option(
+        "", help="Which grading configuration to analyse. Required when several exist."
+    ),
+    graders: str = typer.Option("", help="Derive the gradecfg from a grader set instead."),
 ):
     """Curves, crossover, hard-zero 2x2, and the Shapley decomposition."""
     from soe.analysis.pipeline import run_analysis
 
     cfg = _load_cfg(config)
     res = run_analysis(
-        root, cfg, base_key=base, rl_key=rl, grader=grader, policy=policy, n_boot=n_boot
+        root, cfg, base_key=base, rl_key=rl, grader=grader, policy=policy, n_boot=n_boot,
+        grading_id=_resolve_gradecfg(gradecfg, graders),
     )
     out = Path(root) / f"exp={cfg.exp_id}" / "results" / "metrics" / f"{base}__vs__{rl}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -231,13 +264,18 @@ def figures(
     grader: str = "fastint",
     policy: str = "boxed_last",
     n_boot: int = 2000,
+    gradecfg: str = typer.Option(
+        "", help="Which grading configuration to analyse. Required when several exist."
+    ),
+    graders: str = typer.Option("", help="Derive the gradecfg from a grader set instead."),
 ):
     """Regenerate every figure and table from stored artifacts."""
     from soe.analysis.pipeline import run_analysis, write_outputs
 
     cfg = _load_cfg(config)
     res = run_analysis(
-        root, cfg, base_key=base, rl_key=rl, grader=grader, policy=policy, n_boot=n_boot
+        root, cfg, base_key=base, rl_key=rl, grader=grader, policy=policy, n_boot=n_boot,
+        grading_id=_resolve_gradecfg(gradecfg, graders),
     )
     paths = write_outputs(res, Path(root) / f"exp={cfg.exp_id}" / "results")
     for p in paths:

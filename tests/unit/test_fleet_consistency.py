@@ -164,7 +164,10 @@ def test_verify_detects_two_machines_using_different_manifests(tmp_path):
         cfg, tmp_path, {"mock_mini": problems}, worker=0,
         backend_kwargs={"answers": {p.problem_idx: p.answer for p in problems}}, steal=True,
     )
-    assert verify_experiment(tmp_path, cfg.exp_id, deep=True).ok, "baseline must be clean"
+    # require_complete=False: this tree is deliberately ungraded, and the drift check under
+    # test is on the generation side.
+    base_rep = verify_experiment(tmp_path, cfg.exp_id, deep=True, require_complete=False)
+    assert base_rep.ok, base_rep.render()
 
     # Second VM's view: identical indices and seeds, one problem_uid differs.
     shard = sorted(exp_root(tmp_path, cfg.exp_id).rglob("*.jsonl.zst"))[0]
